@@ -285,7 +285,7 @@ ifneq ($(OSNAME),windows)
 
   # Use uname output for SRCARCH, but deal with platform differences. If ARCH
   # is not explicitly listed below, it is treated as x86.
-  SRCARCH    ?= $(ARCH/$(filter sparc sparc64 ia64 amd64 x86_64 ppc ppc64 ppc64le zero aarch64,$(ARCH)))
+  SRCARCH    ?= $(ARCH/$(filter sparc sparc64 ia64 amd64 x86_64 ppc ppc64 ppc64le zero aarch64 riscv riscv64,$(ARCH)))
   ARCH/       = x86
   ARCH/sparc  = sparc
   ARCH/sparc64= sparc
@@ -297,6 +297,8 @@ ifneq ($(OSNAME),windows)
   ARCH/ppc    = ppc
   ARCH/zero   = zero
   ARCH/aarch64 = aarch64
+  ARCH/riscv   = riscv
+  ARCH/riscv64 = riscv
 
   # BUILDARCH is usually the same as SRCARCH, except for sparcv9
   BUILDARCH ?= $(SRCARCH)
@@ -317,6 +319,11 @@ ifneq ($(OSNAME),windows)
       BUILDARCH = ppc64
     endif
   endif
+  ifeq ($(BUILDARCH), riscv)
+    ifdef LP64
+      BUILDARCH = riscv64
+    endif
+  endif
 
   # LIBARCH is 1:1 mapping from BUILDARCH, except for ARCH=ppc64le
   ifeq ($(ARCH),ppc64le)
@@ -328,13 +335,15 @@ ifneq ($(OSNAME),windows)
   LIBARCH/i486    = i386
   LIBARCH/amd64   = amd64
   LIBARCH/aarch64 = aarch64
+  LIBARCH/riscv   = riscv64
+  LIBARCH/riscv64 = riscv64
   LIBARCH/sparc   = sparc
   LIBARCH/sparcv9 = sparcv9
   LIBARCH/ia64    = ia64
   LIBARCH/ppc64   = ppc64
   LIBARCH/zero    = $(ZERO_LIBARCH)
 
-  LP64_ARCH += sparcv9 amd64 ia64 ppc64 aarch64 zero
+  LP64_ARCH += sparcv9 amd64 ia64 ppc64 aarch64 riscv riscv64 zero
 endif
 
 # Required make macro settings for all platforms

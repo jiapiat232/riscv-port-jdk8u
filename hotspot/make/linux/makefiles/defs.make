@@ -123,6 +123,15 @@ ifeq ($(ARCH), aarch64)
   HS_ARCH          = aarch64
 endif
 
+# RISCV64
+ifneq (,$(findstring $(ARCH), riscv riscv64))
+  ARCH_DATA_MODEL  = 64
+  MAKE_ARGS        += LP64=1
+  PLATFORM         = linux-riscv64
+  VM_PLATFORM      = linux_riscv64
+  HS_ARCH          = riscv
+endif
+
 # On 32 bit linux we build server and client, on 64 bit just server.
 ifeq ($(JVM_VARIANTS),)
   ifeq ($(ARCH_DATA_MODEL), 32)
