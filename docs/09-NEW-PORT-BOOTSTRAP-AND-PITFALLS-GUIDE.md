@@ -632,17 +632,21 @@ hotspot/src/share/vm/utilities/globalDefinitions.hpp:369:16: note: previous decl
   `typedef jubyte u1; typedef jushort u2; typedef juint u4; typedef julong u8;`
 - 如果在 `register_riscv.hpp` 中直接声明 `const Register s1 = x9; const Register s2 = x18; ...`，会导致 C++ 命名空间出现全局符号碰撞，编译器无法区分 `s1` / `s2` / `s4` / `s8` 到底是一个类型名还是一个指针常量变量！
 
-#### 3. 解决准则
-**架构层全局寄存器常量严禁使用 `s1`, `s2`, `s4`, `s8`！**
-- 统一使用 `xs0~xs11` 前缀（或直接使用底层寄存器编号 `x8..x27`，或专用功能别名 `xthread, xheapbase, xlocals` 等）：
-  ```cpp
-  const Register xs0  = x8;
-  const Register xs1  = x9;
-  const Register xs2  = x18;
-  ...
-  const Register xs11 = x27;
-  ```
-- 彻底杜绝与 JVM 共享层 Classfile 基本类型的重名污染。
+#### 3. 解决准则与官方上游（JDK 19+）对齐演进
+**架构层全局寄存器常量严禁使用裸 `s1`, `s2`, `s4`, `s8`！**
+- **官方主线对齐规范（向社区推送准则）**：
+  查验 OpenJDK 官方主线（JEP 422，`src/hotspot/cpu/riscv/`），官方架构师的设计理念更加纯粹：
+  1. `register_riscv.hpp` 严格只声明 `x0~x31` 物理常量编号，根本不定义 `s0~s11`，亦不引入 `xs0~xs11`；
+  2. 唯有具备 HotSpot 专用强语义的寄存器赋予领域名字（`xthread = x23`, `xheapbase = x27`, `xlocals = x24`, `xbcp = x22` 等）；
+  3. 运行时桩（如 `forward_exception`）中若需临时使用 Callee-saved 寄存器，官方统一直接书写物理编号（如 `x9`）；
+  4. 为方便未来向社区开源推送与降低 Code Review 摩擦，本工程已完成对齐重构：剔除 `xs0~xs11`，全面遵循官方物理编号与语义别名规范。
+
+- **跨版本架构移植铁律（JDK 8u vs JDK 19+ 上游）**：
+  上游 RISC-V 端口于 JDK 19+ 正式合入主线，而 JDK 8u 与现代 JDK 存在极为深刻的底层架构鸿沟，后续移植实现绝不可机械照搬上游代码：
+  1. **GC 内存屏障体系**：现代 JDK 全面下沉至 `BarrierSetAssembler`，且 C2 广泛推行 G1 Barrier Late Expand（延迟展开优化）；而在 JDK 8u 中，解释器与汇编器直接耦合 `CardTableModRefBS` 与 `G1SATBCardTableModRefBS`（如 `g1_write_barrier_pre` / `post` 手写汇编调用），绝无 Late Expand 框架；
+  2. **字节码常量池解析**：现代 JDK 引入了 Project Leyden 的 `ResolvedFieldEntry` / `ResolvedMethodEntry`；而 JDK 8u 严格依托 `ConstantPoolCacheEntry` 槽位偏移计算（`f1_byte`, `f2_byte`, `is_vfinal`）；
+  3. **安全点轮询机制**：现代 JDK 采用每线程独立的 `Thread::polling_page_offset()` 内存握手；而 JDK 8u 严格使用单一全局保护页 `os::get_polling_page()` 触发 SIGSEGV。
+  **开发铁律**：以 JDK 8u 的 AArch64 架构机制与接口规范为“骨架”，以最新 JDK 官方 RISC-V 指令序列与寄存器约定为“肌肉”，二者精准对齐融合。
 
 ---
 
