@@ -40,40 +40,98 @@ class MacroAssembler: public Assembler {
 
   void align(int modulus) {
     while (offset() % modulus != 0) {
-      emit_int32(0x00000013); // nop: addi x0, x0, 0
+      nop();
     }
   }
 
-  void nop() {
-    emit_int32(0x00000013); // addi x0, x0, 0
+  // -------------------------------------------------------------
+  // Data Movement & Constant Loading
+  // -------------------------------------------------------------
+  void mov(Register dst, Register src) {
+    mv(dst, src);
   }
 
+  void movptr(Register dst, intptr_t val);
+
+  // -------------------------------------------------------------
+  // Memory Operations with Address
+  // -------------------------------------------------------------
+  void ld(Register dst, Address adr);
+  void sd(Register src, Address adr);
+  void lw(Register dst, Address adr);
+  void sw(Register src, Address adr);
+  void lh(Register dst, Address adr);
+  void sh(Register src, Address adr);
+  void lb(Register dst, Address adr);
+  void sb(Register src, Address adr);
+  void lbu(Register rd, Address adr);
+  void lhu(Register rd, Address adr);
+  void lwu(Register rd, Address adr);
+
+  void fld(FloatRegister dst, Address adr);
+  void fsd(FloatRegister src, Address adr);
+  void flw(FloatRegister dst, Address adr);
+  void fsw(FloatRegister src, Address adr);
+
+  // -------------------------------------------------------------
+  // Stack and Frame Management
+  // -------------------------------------------------------------
+  void build_frame(int framesize);
+  void remove_frame(int framesize);
+  virtual void bang_stack_with_offset(int offset);
+
+  // -------------------------------------------------------------
+  // Calls and Jumps
+  // -------------------------------------------------------------
+  void call(address entry);
+  void jmp(address entry);
+
+  // -------------------------------------------------------------
+  // Safepoints and Thread State
+  // -------------------------------------------------------------
+  void safepoint_poll(Register tmp);
+  void get_thread(Register dst) {
+    mv(dst, xthread);
+  }
+
+  void set_last_Java_frame(Register last_java_sp, Register last_java_fp, address last_java_pc, Register tmp);
+  void reset_last_Java_frame(bool clear_fp = true);
+
+  // -------------------------------------------------------------
+  // Runtime Calls (call_VM family)
+  // -------------------------------------------------------------
+  void call_VM(Register oop_result, address entry_point, bool check_exceptions = true);
+  void call_VM(Register oop_result, address entry_point, Register arg_1, bool check_exceptions = true);
+  void call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, bool check_exceptions = true);
+  void call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, Register arg_3, bool check_exceptions = true);
+
+  void call_VM(Register oop_result, Register last_java_sp, address entry_point, int number_of_arguments = 0, bool check_exceptions = true);
+  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, bool check_exceptions = true);
+  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, Register arg_2, bool check_exceptions = true);
+  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, Register arg_2, Register arg_3, bool check_exceptions = true);
+
+  void call_VM_leaf(address entry_point, int number_of_arguments = 0);
+  void call_VM_leaf(address entry_point, Register arg_1);
+  void call_VM_leaf(address entry_point, Register arg_1, Register arg_2);
+  void call_VM_leaf(address entry_point, Register arg_1, Register arg_2, Register arg_3);
+
+  // -------------------------------------------------------------
+  // Verification and Debugging
+  // -------------------------------------------------------------
   void verify_oop(Register reg, const char* s = "bad oop") PRODUCT_RETURN;
   void verify_oop_addr(Address addr, const char* s = "bad oop") PRODUCT_RETURN;
 
   virtual void null_check(Register reg, int offset = -1);
   static bool needs_explicit_null_check(intptr_t offset);
   static bool uses_implicit_null_check(void* address);
-  void build_frame(int framesize);
 
   void stop(const char* msg) {
-    emit_int32(0x00000073); // ecall / ebreak
+    ebreak();
   }
   void warn(const char* msg) {}
   void untested() { stop("untested"); }
   void unimplemented(const char* what = "") { stop(what); }
   void should_not_reach_here() { stop("should not reach here"); }
-
-  // call_VM overloads
-  void call_VM(Register oop_result, address entry_point, bool check_exceptions = true) {}
-  void call_VM(Register oop_result, address entry_point, Register arg_1, bool check_exceptions = true) {}
-  void call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, bool check_exceptions = true) {}
-  void call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, Register arg_3, bool check_exceptions = true) {}
-
-  void call_VM(Register oop_result, Register last_java_sp, address entry_point, int number_of_arguments = 0, bool check_exceptions = true) {}
-  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, bool check_exceptions = true) {}
-  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, Register arg_2, bool check_exceptions = true) {}
-  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, Register arg_2, Register arg_3, bool check_exceptions = true) {}
 };
 
 #endif // CPU_RISCV_VM_MACROASSEMBLER_RISCV_HPP

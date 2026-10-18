@@ -30,6 +30,16 @@
 #include "runtime/vm_version.hpp"
 
 class VM_Version : public Abstract_VM_Version {
+ public:
+  enum Feature_Flag {
+    CPU_RV64I = 1 << 0,
+    CPU_RV64M = 1 << 1,
+    CPU_RV64A = 1 << 2,
+    CPU_RV64F = 1 << 3,
+    CPU_RV64D = 1 << 4,
+    CPU_RV64C = 1 << 5
+  };
+
  protected:
   static int _cpuFeatures;
   static const char* _features_str;
@@ -38,6 +48,12 @@ class VM_Version : public Abstract_VM_Version {
   static void initialize();
   static void determine_features();
   static const char* cpu_features() { return _features_str; }
+  static bool supports_rv64m() { return (_cpuFeatures & CPU_RV64M) != 0; }
+  static bool supports_rv64a() { return (_cpuFeatures & CPU_RV64A) != 0; }
+  static bool supports_rv64f() { return (_cpuFeatures & CPU_RV64F) != 0; }
+  static bool supports_rv64d() { return (_cpuFeatures & CPU_RV64D) != 0; }
+  static bool supports_rv64c() { return (_cpuFeatures & CPU_RV64C) != 0; }
+  static bool supports_cx8()   { return true; }
 };
 
 #endif // CPU_RISCV_VM_VM_VERSION_RISCV_HPP
