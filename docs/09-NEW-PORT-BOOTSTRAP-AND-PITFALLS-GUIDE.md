@@ -610,6 +610,42 @@ int VM_Version_Ext::number_of_threads() {
 
 ---
 
+### 4.9 坑点 9：架构寄存器别名与共享层全局基本类型冲突（s1/s2/s4/s8 重定义）
+
+#### 1. 错误现场
+在引入 RISC-V Callee-saved 寄存器别名（`s0~s11`）后，编译 `precompiled.hpp.gch` 报严重重定义错误：
+```text
+hotspot/src/cpu/riscv/vm/register_riscv.hpp:153:16: error: ‘RegisterImpl* const s1’ redeclared as different kind of entity
+hotspot/src/share/vm/utilities/globalDefinitions.hpp:366:16: note: previous declaration ‘typedef jbyte s1’
+hotspot/src/cpu/riscv/vm/register_riscv.hpp:162:16: error: ‘RegisterImpl* const s2’ redeclared as different kind of entity
+hotspot/src/share/vm/utilities/globalDefinitions.hpp:367:16: note: previous declaration ‘typedef jshort s2’
+hotspot/src/cpu/riscv/vm/register_riscv.hpp:164:16: error: ‘RegisterImpl* const s4’ redeclared as different kind of entity
+hotspot/src/share/vm/utilities/globalDefinitions.hpp:368:16: note: previous declaration ‘typedef jint s4’
+hotspot/src/cpu/riscv/vm/register_riscv.hpp:168:16: error: ‘RegisterImpl* const s8’ redeclared as different kind of entity
+hotspot/src/share/vm/utilities/globalDefinitions.hpp:369:16: note: previous declaration ‘typedef jlong s8’
+```
+
+#### 2. 深度根因分析
+- 在 RISC-V 标准 ABI 中，Callee-saved 通用寄存器被称为 `s0~s11`（对应物理寄存器 `x8, x9, x18~x27`）。
+- 然而，HotSpot 共享层在 `hotspot/src/share/vm/utilities/globalDefinitions.hpp` 中声明了面向 Class 文件字节码解析的全局整数基础类型：
+  `typedef jbyte s1; typedef jshort s2; typedef jint s4; typedef jlong s8;`
+  `typedef jubyte u1; typedef jushort u2; typedef juint u4; typedef julong u8;`
+- 如果在 `register_riscv.hpp` 中直接声明 `const Register s1 = x9; const Register s2 = x18; ...`，会导致 C++ 命名空间出现全局符号碰撞，编译器无法区分 `s1` / `s2` / `s4` / `s8` 到底是一个类型名还是一个指针常量变量！
+
+#### 3. 解决准则
+**架构层全局寄存器常量严禁使用 `s1`, `s2`, `s4`, `s8`！**
+- 统一使用 `xs0~xs11` 前缀（或直接使用底层寄存器编号 `x8..x27`，或专用功能别名 `xthread, xheapbase, xlocals` 等）：
+  ```cpp
+  const Register xs0  = x8;
+  const Register xs1  = x9;
+  const Register xs2  = x18;
+  ...
+  const Register xs11 = x27;
+  ```
+- 彻底杜绝与 JVM 共享层 Classfile 基本类型的重名污染。
+
+---
+
 ## 五、新架构移植工程化核对清单（Step-by-Step Checklist）
 
 如果未来要在 OpenJDK 8u 中移植另一个全新的指令集架构（如某个专有 ASIC、DSP 或新一代开放架构），可直接按照本工程总结的核对清单推进 Phase 1：

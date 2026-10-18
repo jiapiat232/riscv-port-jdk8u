@@ -176,15 +176,24 @@
 ## 四、【Phase 2】模板解释器与运行时 Stubs（字节码跑通）
 
 * **阶段定位**：实现纯解释器模式（`-Xint`）下的完整运行，打通 Java 字节码执行闭环
-* **阶段状态**：`[ ] 待开始`
+* **阶段状态**：`进行中（Sprint 2.1 已交付）`
 
 ### 【Sprint Card 2.1】运行时基础 Stubs 生成器
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **对应源码**：`stubGenerator_riscv.cpp`, `stubRoutines_riscv.hpp/cpp`
+* **状态**：`[x] 已完成`
+* **对应源码**：
+  * [`hotspot/src/cpu/riscv/vm/stubGenerator_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/stubGenerator_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/stubRoutines_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/stubRoutines_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/stubRoutines_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/stubRoutines_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp)
 * **核心验收 Checklist**：
-  - [ ] 实现 `call_stub`：建立 C++ 调用 Java 解释器入口的桥接栈帧（保存 C++ 被调用者保存寄存器，传递参数）；
-  - [ ] 实现 `catch_exception_entry` 与异常分派桩；
-  - [ ] 实现原子与安全内存复制存根（`atomic_copy_stubs`）。
+  - [x] 实现 `call_stub`：建立 C++ 调用 Java 解释器入口的桥接栈帧（精确对齐 `entry_frame_call_wrapper_offset = -10`、`entry_frame_after_call_words = 35`、保存 C++ `xs0~xs11`、`fs0~fs11` 被调用者保存寄存器，传递参数）；
+  - [x] 实现 `catch_exception_entry` 与异常分派桩（`forward_exception_entry`、`throw_exception` 运行时异常抛出桩）；
+  - [x] 实现原子与安全内存复制存根（`generate_arraycopy_stubs` 支持全部 `jbyte/short/int/long/oop` 的 disjoint/conjoint 内存拷贝，对齐 `CardTableModRefBS` 写屏障）；
+  - [x] 实现 SafeFetch 硬件缺页恢复桩（`SafeFetch32` 与 `SafeFetchN`）；
+  - [x] 实现 `MacroAssembler::pd_patch_instruction` 分支跳转回填机制，70/70 TDD 单测全绿通过；
+  - [x] 成功编译链接进 `libjvm.so`（耗时 1分05秒，0 错误 0 告警）。
 
 ### 【Sprint Card 2.2】解释器栈帧管理与方法调用 ABI
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
