@@ -350,6 +350,9 @@ class Copy : AllStatic {
 #ifdef TARGET_ARCH_ppc
 # include "copy_ppc.hpp"
 #endif
+#ifdef TARGET_ARCH_riscv
+# include "copy_riscv.hpp"
+#endif
 
 };
 
