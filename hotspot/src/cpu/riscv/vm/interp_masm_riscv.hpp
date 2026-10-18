@@ -30,32 +30,142 @@
 #include "interpreter/invocationCounter.hpp"
 #include "runtime/frame.hpp"
 
+// This file specializes the assembler with interpreter-specific macros
 class InterpreterMacroAssembler: public MacroAssembler {
+#ifndef CC_INTERP
+ protected:
+  virtual void call_VM_leaf_base(address entry_point,
+                                 int number_of_arguments);
+
+  virtual void call_VM_base(Register oop_result,
+                            Register java_thread,
+                            Register last_java_sp,
+                            address  entry_point,
+                            int number_of_arguments,
+                            bool check_exceptions);
+
+  virtual void check_and_handle_popframe(Register java_thread);
+  virtual void check_and_handle_earlyret(Register java_thread);
+
+  // Base routine for all dispatches
+  void dispatch_base(TosState state, address* table, bool verifyoop = true);
+#endif // CC_INTERP
+
  public:
   InterpreterMacroAssembler(CodeBuffer* code) : MacroAssembler(code) {}
 
-  void pop(TosState state) {}
-  void push(TosState state) {}
-  void pop_ptr(Register r = x10) {}
-  void pop_i(Register r = x10) {}
-  void pop_l(Register r = x10) {}
-  void pop_f(FloatRegister r = f10) {}
-  void pop_d(FloatRegister r = f10) {}
-  void push_ptr(Register r = x10) {}
-  void push_i(Register r = x10) {}
-  void push_l(Register r = x10) {}
-  void push_f(FloatRegister r = f10) {}
-  void push_d(FloatRegister r = f10) {}
+  void load_earlyret_value(TosState state);
+
+#ifdef CC_INTERP
+  void save_bcp() {}
+  void restore_bcp() {}
+  void get_method(Register reg);
+#else
+  // Interpreter-specific registers
+  void save_bcp() {
+    sd(xbcp, Address(fp, frame::interpreter_frame_bcx_offset * wordSize));
+  }
+
+  void restore_bcp() {
+    ld(xbcp, Address(fp, frame::interpreter_frame_bcx_offset * wordSize));
+  }
+
+  void restore_locals() {
+    ld(xlocals, Address(fp, frame::interpreter_frame_locals_offset * wordSize));
+  }
+
+  void restore_constant_pool_cache() {
+    ld(xcpool, Address(fp, frame::interpreter_frame_cache_offset * wordSize));
+  }
+
+  // Helpers for runtime call arguments/results
+  void get_method(Register reg) {
+    ld(reg, Address(fp, frame::interpreter_frame_method_offset * wordSize));
+  }
+
+  void get_const(Register reg) {
+    get_method(reg);
+    ld(reg, Address(reg, in_bytes(Method::const_offset())));
+  }
+
+  void get_constant_pool(Register reg) {
+    get_const(reg);
+    ld(reg, Address(reg, in_bytes(ConstMethod::constants_offset())));
+  }
+
+  void get_constant_pool_cache(Register reg) {
+    get_constant_pool(reg);
+    ld(reg, Address(reg, ConstantPool::cache_offset_in_bytes()));
+  }
+
+  void get_cpool_and_tags(Register cpool, Register tags) {
+    get_constant_pool(cpool);
+    ld(tags, Address(cpool, ConstantPool::tags_offset_in_bytes()));
+  }
+
+  void get_unsigned_2_byte_index_at_bcp(Register reg, int bcp_offset);
+  void get_cache_and_index_at_bcp(Register cache, Register index, int bcp_offset, size_t index_size = sizeof(u2));
+  void get_cache_and_index_and_bytecode_at_bcp(Register cache, Register index, Register bytecode, int byte_no, int bcp_offset, size_t index_size = sizeof(u2));
+  void get_cache_entry_pointer_at_bcp(Register cache, Register tmp, int bcp_offset, size_t index_size = sizeof(u2));
+  void get_cache_index_at_bcp(Register index, int bcp_offset, size_t index_size = sizeof(u2));
+  void get_method_counters(Register method, Register mcs, Label& skip);
+
+  // Load cpool->resolved_references(index)
+  void load_resolved_reference_at_index(Register result, Register index);
+
+  // Expression stack operations
+  void pop_ptr(Register r = x10);
+  void pop_i(Register r = x10);
+  void pop_l(Register r = x10);
+  void pop_f(FloatRegister r = f10);
+  void pop_d(FloatRegister r = f10);
+  void push_ptr(Register r = x10);
+  void push_i(Register r = x10);
+  void push_l(Register r = x10);
+  void push_f(FloatRegister r = f10);
+  void push_d(FloatRegister r = f10);
+
+  void pop(Register r)  { ((MacroAssembler*)this)->pop(r); }
+  void push(Register r) { ((MacroAssembler*)this)->push(r); }
+
+  void pop(TosState state);  // transition vtos -> state
+  void push(TosState state); // transition state -> vtos
+
+  void empty_expression_stack() {
+    ld(esp, Address(fp, frame::interpreter_frame_monitor_block_top_offset * wordSize));
+    sd(zr, Address(fp, frame::interpreter_frame_last_sp_offset * wordSize));
+  }
+
+  // Helpers for swap and dup
+  void load_ptr(int n, Register val);
+  void store_ptr(int n, Register val);
+
+  void prepare_to_jump_from_interpreted();
+  void jump_from_interpreted(Register method, Register temp);
 
   void verify_FPU(int stack_depth, TosState state = ftos) {}
   void verify_method_data_pointer() {}
   void dispatch_prolog(TosState state, int step = 0) {}
-  void dispatch_epilog(TosState state, int step = 0) {}
-  void dispatch_only(TosState state) {}
-  void dispatch_only_normal(TosState state) {}
-  void dispatch_only_noverify(TosState state) {}
-  void dispatch_next(TosState state, int step = 0) {}
-  void dispatch_via(TosState state, address* table) {}
+  void dispatch_epilog(TosState state, int step = 0);
+  void dispatch_only(TosState state);
+  void dispatch_only_normal(TosState state);
+  void dispatch_only_noverify(TosState state);
+  void dispatch_next(TosState state, int step = 0);
+  void dispatch_via(TosState state, address* table);
+
+  // Synchronization
+  void lock_object(Register lock_reg);
+  void unlock_object(Register lock_reg);
+
+  // Stack activation removal
+  void remove_activation(TosState state,
+                         bool throw_monitor_exception = true,
+                         bool install_monitor_exception = true,
+                         bool notify_jvmdi = true);
+
+  // Profile and counters
+  void update_mdp_for_ret(Register return_bci);
+#endif // !CC_INTERP
 };
 
 #endif // CPU_RISCV_VM_INTERP_MASM_RISCV_HPP

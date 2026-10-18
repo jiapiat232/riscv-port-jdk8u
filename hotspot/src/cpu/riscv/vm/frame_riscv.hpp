@@ -71,7 +71,8 @@
 
     arg_reg_save_area_bytes                          =  0,
     metadata_words                                   =  2,
-    frame_alignment                                  = 16
+    frame_alignment                                  = 16,
+    native_frame_initial_param_offset                =  0
   };
 
   intptr_t ptr_at(int offset) const {
@@ -91,6 +92,13 @@
     return (intptr_t*) addr_at(offset);
   }
 
+#ifdef ASSERT
+  static void verify_deopt_original_pc(   nmethod* nm, intptr_t* unextended_sp, bool is_method_handle_return = false);
+  static void verify_deopt_mh_original_pc(nmethod* nm, intptr_t* unextended_sp) {
+    verify_deopt_original_pc(nm, unextended_sp, true);
+  }
+#endif
+
  public:
   // Constructors
   frame(intptr_t* sp, intptr_t* fp, address pc);
@@ -102,6 +110,8 @@
   intptr_t* fp() const { return _fp; }
 
   inline address* sender_pc_addr() const;
+  inline address  sender_pc_maybe_signed() const;
+  inline address* native_param_addr(int idx) const;
 
   // expression stack tos if we are nested in a java call
   intptr_t* interpreter_frame_last_sp() const;

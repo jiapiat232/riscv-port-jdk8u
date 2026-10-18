@@ -1,0 +1,492 @@
+/*
+ * Copyright (c) 1997, 2026, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2023, Huawei Technologies Co., Ltd. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+ * or visit www.oracle.com if you need additional information or have any
+ * questions.
+ *
+ */
+
+#include "precompiled.hpp"
+#include "interpreter/interpreter.hpp"
+#include "memory/resourceArea.hpp"
+#include "oops/markOop.hpp"
+#include "oops/method.hpp"
+#include "oops/oop.inline.hpp"
+#include "runtime/frame.inline.hpp"
+#include "runtime/handles.inline.hpp"
+#include "runtime/javaCalls.hpp"
+#include "runtime/monitorChunk.hpp"
+#include "runtime/sharedRuntime.hpp"
+#include "runtime/signature.hpp"
+#include "runtime/stubCodeGenerator.hpp"
+#include "runtime/stubRoutines.hpp"
+#include "vmreg_riscv.inline.hpp"
+#ifdef COMPILER1
+#include "c1/c1_Runtime1.hpp"
+#include "runtime/vframeArray.hpp"
+#endif
+
+#ifdef ASSERT
+void RegisterMap::check_location_valid() {
+}
+#endif
+
+// Profiling/safepoint support
+bool frame::safe_for_sender(JavaThread *thread) {
+  address   sp = (address)_sp;
+  address   fp = (address)_fp;
+  address   unextended_sp = (address)_unextended_sp;
+
+  // consider stack guards when trying to determine "safe" stack pointers
+  static size_t stack_guard_size = os::uses_stack_guard_pages() ? (StackYellowPages + StackRedPages) * os::vm_page_size() : 0;
+  size_t usable_stack_size = thread->stack_size() - stack_guard_size;
+
+  // sp must be within the usable part of the stack (not in guards)
+  bool sp_safe = (sp < thread->stack_base()) &&
+                 (sp >= thread->stack_base() - usable_stack_size);
+
+  if (!sp_safe) {
+    return false;
+  }
+
+  bool unextended_sp_safe = (unextended_sp < thread->stack_base());
+  if (!unextended_sp_safe) {
+    return false;
+  }
+
+  bool fp_safe = (fp < thread->stack_base() && (fp > sp) && (((fp + (return_addr_offset * sizeof(void*))) < thread->stack_base())));
+
+  if (_cb != NULL) {
+    if (!_cb->is_frame_complete_at(_pc)) {
+      if (_cb->is_nmethod() || _cb->is_adapter_blob() || _cb->is_runtime_stub()) {
+        return false;
+      }
+    }
+
+    if (!_cb->code_contains(_pc)) {
+      return false;
+    }
+
+    // Entry frame checks
+    if (is_entry_frame()) {
+      if (!fp_safe) return false;
+
+      address jcw = (address)entry_frame_call_wrapper();
+      bool jcw_safe = (jcw < thread->stack_base()) && (jcw > fp);
+      return jcw_safe;
+    }
+
+    intptr_t* sender_sp = NULL;
+    intptr_t* sender_unextended_sp = NULL;
+    address   sender_pc = NULL;
+    intptr_t* saved_fp = NULL;
+
+    if (is_interpreted_frame()) {
+      if (!fp_safe) {
+        return false;
+      }
+
+      sender_pc = (address) this->fp()[return_addr_offset];
+      sender_sp = (intptr_t*) addr_at(sender_sp_offset);
+      sender_unextended_sp = (intptr_t*) this->fp()[interpreter_frame_sender_sp_offset];
+      saved_fp = (intptr_t*) this->fp()[link_offset];
+
+    } else {
+      if (_cb->frame_size() <= 0) {
+        return false;
+      }
+
+      sender_sp = _unextended_sp + _cb->frame_size();
+      sender_unextended_sp = sender_sp;
+      sender_pc = (address) *(sender_sp - 1);
+      saved_fp = (intptr_t*) *(sender_sp - frame::sender_sp_offset);
+    }
+
+    if (Interpreter::contains(sender_pc)) {
+      bool saved_fp_safe = ((address)saved_fp < thread->stack_base()) && (saved_fp > sender_sp);
+      if (!saved_fp_safe) {
+        return false;
+      }
+
+      frame sender(sender_sp, sender_unextended_sp, saved_fp, sender_pc);
+      return sender.is_interpreted_frame_valid(thread);
+    }
+
+    CodeBlob* sender_blob = CodeCache::find_blob_unsafe(sender_pc);
+    if (sender_pc == NULL || sender_blob == NULL) {
+      return false;
+    }
+
+    if (sender_blob->is_zombie() || sender_blob->is_unloaded()) {
+      return false;
+    }
+
+    if (!sender_blob->code_contains(sender_pc)) {
+      return false;
+    }
+
+    if (sender_blob->is_adapter_blob()) {
+      return false;
+    }
+
+    if (StubRoutines::returns_to_call_stub(sender_pc)) {
+      bool saved_fp_safe = ((address)saved_fp < thread->stack_base()) && (saved_fp > sender_sp);
+      if (!saved_fp_safe) {
+        return false;
+      }
+
+      frame sender(sender_sp, sender_unextended_sp, saved_fp, sender_pc);
+      address jcw = (address)sender.entry_frame_call_wrapper();
+      bool jcw_safe = (jcw < thread->stack_base()) && (jcw > (address)sender.fp());
+      return jcw_safe;
+    }
+
+    if (sender_blob->is_nmethod()) {
+      nmethod* nm = sender_blob->as_nmethod_or_null();
+      if (nm != NULL) {
+        if (nm->is_deopt_mh_entry(sender_pc) || nm->is_deopt_entry(sender_pc)) {
+          return false;
+        }
+      }
+    }
+
+    if (sender_blob->frame_size() <= 0) {
+      assert(!sender_blob->is_nmethod(), "should count return address at least");
+      return false;
+    }
+
+    intptr_t* potential_elements = sender_sp - sender_blob->frame_size();
+    if (potential_elements < (intptr_t*)thread->stack_base() - usable_stack_size) {
+      return false;
+    }
+
+    return true;
+  }
+
+  // Must be an interpreted frame that was not recognized by code cache (e.g. initial setup)
+  return false;
+}
+
+void frame::patch_pc(Thread* thread, address pc) {
+  address* pc_addr = &(((address*) sp())[-1]);
+  if (TracePcPatching) {
+    tty->print_cr("patch_pc at address " INTPTR_FORMAT " [" INTPTR_FORMAT " -> " INTPTR_FORMAT "]",
+                  p2i(pc_addr), p2i(*pc_addr), p2i(pc));
+  }
+  *pc_addr = pc;
+  _pc = pc;
+}
+
+bool frame::is_interpreted_frame() const {
+  return Interpreter::contains(pc());
+}
+
+int frame::frame_size(RegisterMap* map) const {
+  frame sender = this->sender(map);
+  return sender.sp() - sp();
+}
+
+intptr_t* frame::entry_frame_argument_at(int offset) const {
+  return (intptr_t*) &fp()[entry_frame_call_wrapper_offset - 1 - offset];
+}
+
+#ifndef CC_INTERP
+
+intptr_t* frame::interpreter_frame_sender_sp() const {
+  assert(is_interpreted_frame(), "interpreted frame expected");
+  return (intptr_t*) at(interpreter_frame_sender_sp_offset);
+}
+
+void frame::set_interpreter_frame_sender_sp(intptr_t* sender_sp) {
+  assert(is_interpreted_frame(), "interpreted frame expected");
+  ptr_at_put(interpreter_frame_sender_sp_offset, (intptr_t) sender_sp);
+}
+
+BasicObjectLock* frame::interpreter_frame_monitor_begin() const {
+  return (BasicObjectLock*) addr_at(interpreter_frame_monitor_block_bottom_offset);
+}
+
+BasicObjectLock* frame::interpreter_frame_monitor_end() const {
+  BasicObjectLock* result = (BasicObjectLock*) *addr_at(interpreter_frame_monitor_block_top_offset);
+  assert(result <= interpreter_frame_monitor_begin(), "sanity check");
+  assert(((intptr_t)result & (Interpreter::stackElementWords - 1)) == 0, "must be properly aligned");
+  return result;
+}
+
+void frame::interpreter_frame_set_monitor_end(BasicObjectLock* value) {
+  *((BasicObjectLock**)addr_at(interpreter_frame_monitor_block_top_offset)) = value;
+}
+
+intptr_t* frame::interpreter_frame_last_sp() const {
+  return *(intptr_t**)addr_at(interpreter_frame_last_sp_offset);
+}
+
+void frame::interpreter_frame_set_last_sp(intptr_t* sp) {
+  *((intptr_t**)addr_at(interpreter_frame_last_sp_offset)) = sp;
+}
+
+#endif // CC_INTERP
+
+frame frame::sender_for_entry_frame(RegisterMap* map) const {
+  assert(map != NULL, "map must be set");
+  JavaFrameAnchor* jfa = entry_frame_call_wrapper()->anchor();
+  assert(!entry_frame_is_first(), "next Java fp must be non zero");
+  assert(jfa->last_Java_sp() > sp(), "must be above this frame on stack");
+
+  if (!jfa->walkable()) {
+    jfa->capture_last_Java_pc();
+  }
+  map->clear();
+  assert(map->include_argument_oops(), "should be set by clear");
+  assert(jfa->last_Java_pc() != NULL, "not walkable");
+  frame fr(jfa->last_Java_sp(), jfa->last_Java_fp(), jfa->last_Java_pc());
+  return fr;
+}
+
+#ifdef ASSERT
+void frame::verify_deopt_original_pc(nmethod* nm, intptr_t* unextended_sp, bool is_method_handle_return) {
+  frame fr;
+  fr._unextended_sp = unextended_sp;
+  address original_pc = nm->get_original_pc(&fr);
+  assert(nm->insts_contains(original_pc), "original PC must be in nmethod");
+  assert(nm->is_method_handle_return(original_pc) == is_method_handle_return, "must be");
+}
+#endif
+
+void frame::adjust_unextended_sp() {
+  nmethod* sender_nm = (_cb == NULL) ? NULL : _cb->as_nmethod_or_null();
+  if (sender_nm != NULL) {
+    if (sender_nm->is_deopt_mh_entry(_pc)) {
+      DEBUG_ONLY(verify_deopt_mh_original_pc(sender_nm, _fp));
+      _unextended_sp = _fp;
+    } else if (sender_nm->is_deopt_entry(_pc)) {
+      DEBUG_ONLY(verify_deopt_original_pc(sender_nm, _unextended_sp));
+    } else if (sender_nm->is_method_handle_return(_pc)) {
+      _unextended_sp = _fp;
+    }
+  }
+}
+
+void frame::update_map_with_saved_link(RegisterMap* map, intptr_t** link_addr) {
+  map->set_location(::fp->as_VMReg(), (address) link_addr);
+  map->set_location(::fp->as_VMReg()->next(), (address) link_addr);
+}
+
+frame frame::sender_for_interpreter_frame(RegisterMap* map) const {
+  intptr_t* sender_sp = this->sender_sp();
+  intptr_t* unextended_sp = interpreter_frame_sender_sp();
+
+#ifdef COMPILER2
+  if (map->update_map()) {
+    update_map_with_saved_link(map, (intptr_t**) addr_at(link_offset));
+  }
+#endif // COMPILER2
+
+  return frame(sender_sp, unextended_sp, link(), sender_pc_maybe_signed());
+}
+
+frame frame::sender_for_compiled_frame(RegisterMap* map) const {
+  assert(_cb->frame_size() >= 0, "must have non-zero frame size");
+  intptr_t* l_sender_sp = unextended_sp() + _cb->frame_size();
+  intptr_t* unextended_sp = l_sender_sp;
+
+  address sender_pc = (address) *(l_sender_sp - 1);
+  intptr_t** saved_fp_addr = (intptr_t**) (l_sender_sp - frame::sender_sp_offset);
+
+  if (map->update_map()) {
+    map->set_include_argument_oops(_cb->caller_must_gc_arguments(map->thread()));
+    if (_cb->oop_maps() != NULL) {
+      OopMapSet::update_register_map(this, map);
+    }
+    update_map_with_saved_link(map, saved_fp_addr);
+  }
+
+  return frame(l_sender_sp, unextended_sp, *saved_fp_addr, sender_pc);
+}
+
+frame frame::sender(RegisterMap* map) const {
+  map->set_include_argument_oops(false);
+
+  if (is_entry_frame())
+    return sender_for_entry_frame(map);
+  if (is_interpreted_frame())
+    return sender_for_interpreter_frame(map);
+  assert(_cb == CodeCache::find_blob(pc()), "Must be the same");
+
+  if (_cb != NULL) {
+    return sender_for_compiled_frame(map);
+  }
+
+  return frame(sender_sp(), link(), sender_pc());
+}
+
+bool frame::interpreter_frame_equals_unpacked_fp(intptr_t* fp) {
+  assert(is_interpreted_frame(), "must be interpreter frame");
+  Method* method = interpreter_frame_method();
+  int diff = (method->max_locals() - method->size_of_parameters()) *
+             Interpreter::stackElementWords;
+  return _fp == (fp - diff);
+}
+
+void frame::pd_gc_epilog() {
+}
+
+bool frame::is_interpreted_frame_valid(JavaThread* thread) const {
+#ifndef CC_INTERP
+  assert(is_interpreted_frame(), "Not an interpreted frame");
+  if (fp() == 0 || (intptr_t(fp()) & (wordSize - 1)) != 0) {
+    return false;
+  }
+  if (sp() == 0 || (intptr_t(sp()) & (wordSize - 1)) != 0) {
+    return false;
+  }
+  if (fp() + interpreter_frame_initial_sp_offset < sp()) {
+    return false;
+  }
+  if (fp() <= sp()) {
+    return false;
+  }
+
+  Method* m = *interpreter_frame_method_addr();
+  if (!m->is_valid_method()) return false;
+
+  if (fp() - unextended_sp() > 1024 + m->max_stack() * Interpreter::stackElementSize) {
+    return false;
+  }
+
+  intptr_t bcx = interpreter_frame_bcx();
+  if (m->validate_bci_from_bcx(bcx) < 0) {
+    return false;
+  }
+
+  ConstantPoolCache* cp = *interpreter_frame_cache_addr();
+  if (cp == NULL || !cp->is_metaspace_object()) return false;
+
+  address locals = (address) *interpreter_frame_locals_addr();
+  if (locals > thread->stack_base() || locals < (address) fp()) return false;
+
+#endif // CC_INTERP
+  return true;
+}
+
+BasicType frame::interpreter_frame_result(oop* oop_result, jvalue* value_result) {
+  assert(is_interpreted_frame(), "interpreted frame expected");
+  Method* method = interpreter_frame_method();
+  BasicType type = method->result_type();
+
+  intptr_t* tos_addr;
+  if (method->is_native()) {
+    tos_addr = (intptr_t*)sp();
+    if (type == T_FLOAT || type == T_DOUBLE) {
+      tos_addr += 2 * Interpreter::stackElementWords;
+    }
+  } else {
+    tos_addr = (intptr_t*)interpreter_frame_tos_address();
+  }
+
+  switch (type) {
+    case T_OBJECT  :
+    case T_ARRAY   : {
+      oop obj;
+      if (method->is_native()) {
+        obj = cast_to_oop(at(interpreter_frame_oop_temp_offset));
+      } else {
+        oop* obj_p = (oop*)tos_addr;
+        obj = (obj_p == NULL) ? (oop)NULL : *obj_p;
+      }
+      assert(obj == NULL || Universe::heap()->is_in(obj), "sanity check");
+      *oop_result = obj;
+      break;
+    }
+    case T_BOOLEAN : value_result->z = *(jboolean*)tos_addr; break;
+    case T_BYTE    : value_result->b = *(jbyte*)tos_addr; break;
+    case T_CHAR    : value_result->c = *(jchar*)tos_addr; break;
+    case T_SHORT   : value_result->s = *(jshort*)tos_addr; break;
+    case T_INT     : value_result->i = *(jint*)tos_addr; break;
+    case T_LONG    : value_result->j = *(jlong*)tos_addr; break;
+    case T_FLOAT   : value_result->f = *(jfloat*)tos_addr; break;
+    case T_DOUBLE  : value_result->d = *(jdouble*)tos_addr; break;
+    case T_VOID    : break;
+    default        : ShouldNotReachHere();
+  }
+
+  return type;
+}
+
+intptr_t* frame::interpreter_frame_tos_at(jint offset) const {
+  int index = (Interpreter::expr_offset_in_bytes(offset) / wordSize);
+  return &interpreter_frame_tos_address()[index];
+}
+
+#ifndef PRODUCT
+#define DESCRIBE_FP_OFFSET(name) \
+  values.describe(frame_no, fp() + frame::name##_offset, #name)
+
+void frame::describe_pd(FrameValues& values, int frame_no) {
+  if (is_interpreted_frame()) {
+    DESCRIBE_FP_OFFSET(interpreter_frame_sender_sp);
+    DESCRIBE_FP_OFFSET(interpreter_frame_last_sp);
+    DESCRIBE_FP_OFFSET(interpreter_frame_method);
+    DESCRIBE_FP_OFFSET(interpreter_frame_mdx);
+    DESCRIBE_FP_OFFSET(interpreter_frame_cache);
+    DESCRIBE_FP_OFFSET(interpreter_frame_locals);
+    DESCRIBE_FP_OFFSET(interpreter_frame_bcx);
+    DESCRIBE_FP_OFFSET(interpreter_frame_initial_sp);
+  }
+}
+#undef DESCRIBE_FP_OFFSET
+#endif
+
+intptr_t *frame::initial_deoptimization_info() {
+  return NULL;
+}
+
+intptr_t* frame::real_fp() const {
+  if (_cb != NULL) {
+    int size = _cb->frame_size();
+    if (size > 0) {
+      return unextended_sp() + size;
+    }
+  }
+  assert(!is_compiled_frame(), "unknown compiled frame size");
+  return fp();
+}
+
+#ifndef PRODUCT
+frame::frame(void* sp, void* fp, void* pc) {
+  init((intptr_t*)sp, (intptr_t*)fp, (address)pc);
+}
+#endif
+
+void JavaFrameAnchor::make_walkable(JavaThread* thread) {
+  if (last_Java_sp() == NULL) return;
+  if (walkable()) return;
+  assert(Thread::current() == (Thread*)thread, "not current thread");
+  assert(last_Java_sp() != NULL, "not called from Java code?");
+  assert(last_Java_pc() == NULL, "already walkable");
+  capture_last_Java_pc();
+  assert(walkable(), "something went wrong");
+}
+
+void JavaFrameAnchor::capture_last_Java_pc() {
+  assert(_last_Java_sp != NULL, "no last frame set");
+  assert(_last_Java_pc == NULL, "already walkable");
+  _last_Java_pc = (address)_last_Java_sp[-1];
+}

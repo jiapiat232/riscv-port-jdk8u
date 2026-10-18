@@ -374,6 +374,8 @@ class Assembler : public AbstractAssembler {
   void neg(Register rd, Register rs)   { sub(rd, zr, rs); }
   void negw(Register rd, Register rs)  { subw(rd, zr, rs); }
   void j(int32_t offset)               { jal(zr, offset); }
+  void jr(Register rs)                 { jalr(zr, rs, 0); }
+  void jalr(Register rs)               { jalr(ra, rs, 0); }
   void ret()                           { jalr(zr, ra, 0); }
 
   virtual RegisterOrConstant delayed_value_impl(intptr_t* delayed_value_addr,
