@@ -197,11 +197,35 @@
 
 ### 【Sprint Card 2.2】解释器栈帧管理与方法调用 ABI
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **对应源码**：`frame_riscv.hpp/cpp`, `interp_masm_riscv.hpp/cpp`, `sharedRuntime_riscv.cpp`
+* **状态**：`[x] 已完成`
+* **对应源码清单**：
+  * [`hotspot/src/cpu/riscv/vm/frame_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/frame_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/frame_riscv.inline.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/frame_riscv.inline.hpp)
+  * [`hotspot/src/cpu/riscv/vm/frame_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/frame_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/interpreter_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interpreter_riscv.hpp)
+  * [`hotspot/src/share/vm/interpreter/interpreter.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/interpreter/interpreter.hpp)
+  * [`hotspot/src/cpu/riscv/vm/interp_masm_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interp_masm_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/interp_masm_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interp_masm_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/interpreterRT_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interpreterRT_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp)
 * **核心验收 Checklist**：
-  - [ ] 建立标准 HotSpot 解释器栈帧（`fp`, `ra`, `xbcp (s8)`, `xlocals (s7)`, `xmethod (s9)`）；
-  - [ ] 实现 `InterpreterMacroAssembler` 栈顶缓存（ToS - Top of Stack Cache）管理；
-  - [ ] 实现 Java 到 JNI 本地方法调用的转接桩（Java-to-Native / Native-to-Java）。
+  - [x] **建立标准 HotSpot 解释器栈帧管理机制**：
+    - 在 `frame_riscv` 中实现 `sender_for_interpreter_frame`、`sender_for_entry_frame`、`sender_for_compiled_frame` 及统一栈回溯分派 `sender()`；
+    - 严密对齐栈槽位偏移（`locals_offset = -8`, `bcx_offset = -9`, `initial_sp_offset = -10`, `sender_sp_offset = -3`, `last_sp_offset = -4`, `method_offset = -5`, `cache_offset = -7`）；
+    - 实现栈遍历安全检测 `frame::safe_for_sender(JavaThread*)`，准确隔离 Guard 保护页、死循环与未对齐指针；
+    - 实现动态反优化检查 `frame::adjust_unextended_sp()`、监控块寻址 `interpreter_frame_monitor_begin/end` 与执行结果回填 `interpreter_frame_result`；
+  - [x] **实现 `InterpreterMacroAssembler` 栈顶缓存与字节码分派系统**：
+    - 实现 ToS（Top of Stack Cache）压栈/弹栈（`push/pop(TosState)`、`push/pop_ptr/i/l/f/d`），支持 64 位机器字与双字对齐；
+    - 实现高效字节码分派宏 `dispatch_next`、`dispatch_via`、`dispatch_base`，指令数优化至最简加载跳转；
+    - 实现常量池与字节码解析宏（`get_unsigned_2_byte_index_at_bcp`、`get_cache_and_index_at_bcp`、`get_method_counters`）；
+  - [x] **实现 Java / C 调用约定与运行时调用桥接桩**：
+    - 遵循 RISC-V 标准 LP64D ABI 实现 `SharedRuntime::c_calling_convention` 与 `SharedRuntime::java_calling_convention`（8 个整型寄存器 `a0~a7` + 8 个浮点寄存器 `fa0~fa7`，超出部分 64 位栈对齐传递）；
+    - 实现方法调用适配器桩生成（`generate_i2c2i_adapters` 中的 `i2c_entry` 与 `c2i_entry`）；
+    - 实现 JNI 本地方法调用包装器生成器（`generate_native_wrapper`）与签名处理器（`SignatureHandlerGenerator`）；
+    - 实现全局 Safepoint 桩（`generate_handler_blob`）、方法解析桩（`generate_resolve_blob`）、反优化桩（`generate_deopt_blob`）与罕见陷阱桩（`generate_uncommon_trap_blob`）；
+  - [x] **编译链接验证通过**：
+    - `./docker/make.sh hotspot` 成功编译全部 frame、interp_masm、interpreterRT 与 sharedRuntime 源码并完成 `Linking vm...`，产出 23MB 的 ELF `libjvm.so`；
+    - 70/70 TDD 单测比对 GNU as 100% PASS。
 
 ### 【Sprint Card 2.3】模板解释器核心表与 200+ 字节码模板
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`

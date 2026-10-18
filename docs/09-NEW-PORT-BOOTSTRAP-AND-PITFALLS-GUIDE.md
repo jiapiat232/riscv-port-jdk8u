@@ -646,6 +646,82 @@ hotspot/src/share/vm/utilities/globalDefinitions.hpp:369:16: note: previous decl
 
 ---
 
+### 4.10 类作用域成员函数遮蔽全局寄存器别名陷阱（`frame::fp()` vs `::fp`）
+
+#### 1. 现象
+在实现 `frame_riscv.cpp` 的 `frame::update_map_with_saved_link` 时：
+```cpp
+void frame::update_map_with_saved_link(RegisterMap* map, intptr_t** link_addr) {
+  map->set_location(fp->as_VMReg(), (address) link_addr);
+}
+```
+GCC 报错：
+`error: invalid use of member function 'intptr_t* frame::fp() const' (did you forget the '()' ?)`
+`error: base operand of '->' is not a pointer`
+
+#### 2. 根因
+在 `class frame` 成员函数作用域内，编译器在非限定名称查找（Unqualified Name Lookup）时，类成员函数 `frame::fp()` 的优先级高于全局作用域中声明的寄存器常量 `const Register fp = x8;`。编译器将 `fp` 解析为了成员函数指针，进而拒绝调用 `->as_VMReg()`。
+
+#### 3. 解决准则
+在 `class frame` 或任何拥有同名成员方法的类（例如拥有 `sp()`, `fp()`, `pc()` 方法的类）内部访问全局硬件寄存器常量时，必须显式附加全局作用域限定符：
+```cpp
+void frame::update_map_with_saved_link(RegisterMap* map, intptr_t** link_addr) {
+  map->set_location(::fp->as_VMReg(), (address) link_addr);
+  map->set_location(::fp->as_VMReg()->next(), (address) link_addr);
+}
+```
+
+---
+
+### 4.11 共享层嵌入式头文件架构接入（`interpreter_<arch>.hpp`）
+
+#### 1. 现象
+在编译 `frame_riscv.cpp` 时报错：
+`error: 'expr_offset_in_bytes' is not a member of 'Interpreter'`
+
+#### 2. 根因
+HotSpot 解释器核心类 `AbstractInterpreter` / `Interpreter` 将部分平台特有的表达式栈和局部变量偏移计算函数放在 `interpreter_<arch>.hpp` 中，并通过 `interpreter.hpp` 在类定义的末尾直接嵌入包含：
+```cpp
+#ifdef TARGET_ARCH_x86
+# include "interpreter_x86.hpp"
+#endif
+```
+若遗漏在 `interpreter.hpp` 中挂载 `#ifdef TARGET_ARCH_riscv` 并提供 `interpreter_riscv.hpp`，`Interpreter::expr_offset_in_bytes` 等静态函数便不复存在。
+
+#### 3. 解决准则
+新架构必须创建 `hotspot/src/cpu/<arch>/vm/interpreter_<arch>.hpp`，实现：
+- `static int expr_offset_in_bytes(int i) { return stackElementSize * i; }`
+- `static int expr_index_at(int i)        { return stackElementWords * i; }`
+- `static int local_index_at(int i)       { return stackElementWords * i; }`
+并在 `hotspot/src/share/vm/interpreter/interpreter.hpp` 中添加包含路由。
+
+---
+
+### 4.12 `SharedRuntime::c_calling_convention` 的 4 参数签名规范
+
+#### 1. 现象
+在 `sharedRuntime_riscv.cpp` 中若按照常见的 3 参数实现：
+`int SharedRuntime::c_calling_convention(const BasicType *sig_bt, VMRegPair *regs, int total_args_passed)`
+会导致链接报错 `no declaration matches`。
+
+#### 2. 根因
+OpenJDK 8u 的共享层头文件 `sharedRuntime.hpp` 中，C 调用约定接口为了支持某些需要辅助寄存器数组的特殊架构（如部分 SPARC/PowerPC 变体），固定声明了 4 个参数：
+`static int c_calling_convention(const BasicType *sig_bt, VMRegPair *regs, VMRegPair *regs2, int total_args_passed);`
+
+#### 3. 解决准则
+RISC-V 端口必须严格匹配 4 参数原型，并在函数头部断言 `regs2 == NULL`：
+```cpp
+int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
+                                         VMRegPair *regs,
+                                         VMRegPair *regs2,
+                                         int total_args_passed) {
+  assert(regs2 == NULL, "not needed on RISC-V");
+  ...
+}
+```
+
+---
+
 ## 五、新架构移植工程化核对清单（Step-by-Step Checklist）
 
 如果未来要在 OpenJDK 8u 中移植另一个全新的指令集架构（如某个专有 ASIC、DSP 或新一代开放架构），可直接按照本工程总结的核对清单推进 Phase 1：
