@@ -67,3 +67,9 @@
    * 断言与防御性检查分级（`assert` vs `guarantee`，`fatal`，`ShouldNotReachHere`，`Unimplemented`）。
    * 并发与无锁编程铁律（RVWMO 屏障映射、AMO 单指令铁律杜绝活锁）。
    * 文件组织三段式（`.hpp` 声明, `.inline.hpp` 热点内联, `.cpp` 实体）与命名排版格式约束。
+
+9. [新架构移植指南：从零构建基础 libjvm.so 的适配矩阵与踩坑实录 (09-NEW-PORT-BOOTSTRAP-AND-PITFALLS-GUIDE.md)](file:///Users/wujiahua/code/riscv-port-jdk8u/docs/09-NEW-PORT-BOOTSTRAP-AND-PITFALLS-GUIDE.md)
+   * 架构闭环目标定义：什么是“基础版本 libjvm.so 编译链接基线”（Linkable Minimal Baseline）？
+   * 八大核心子系统最小适配矩阵（构建系统三元组、全局宏路由、CPU 寄存器体系、RVWMO 内存屏障/原子操作、Linux OS/CPU 信号粘合、LP64 栈帧回溯、汇编器基座、C1/C2 编译器骨架）。
+   * Phase 1 实战踩坑全景复盘（全局寄存器别名 `zero` 污染数学库、C++98 语言基线降级、非 PCH 编译单元 `VM_Version` 包含断裂、ADLC `CallStubImpl`/`HandlerImpl` 链接未决、Serviceability Agent 构建解耦、Linux ELF `EM_RISCV` 与大页识别等 8 大核心陷阱）。
+   * 新硬件架构移植工程化核对清单（Step-by-Step 19项阶段验收检查表）。
