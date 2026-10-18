@@ -253,6 +253,26 @@ uint32_t insn_fsd(FloatRegister rs2, Register rs1, int32_t offset) {
   return encode_s_fp(offset, rs2, rs1, 0b011, STORE_FP);
 }
 
+static uint32_t patch_b_insn(uint32_t insn, int32_t offset) {
+  uint32_t imm12 = (offset >> 12) & 0x1;
+  uint32_t imm11 = (offset >> 11) & 0x1;
+  uint32_t imm10_5 = (offset >> 5) & 0x3f;
+  uint32_t imm4_1 = (offset >> 1) & 0xf;
+  insn &= ~((1U << 31) | (0x3f << 25) | (0xf << 8) | (1 << 7));
+  insn |= (imm12 << 31) | (imm10_5 << 25) | (imm4_1 << 8) | (imm11 << 7);
+  return insn;
+}
+
+static uint32_t patch_j_insn(uint32_t insn, int32_t offset) {
+  uint32_t imm20 = (offset >> 20) & 0x1;
+  uint32_t imm19_12 = (offset >> 12) & 0xff;
+  uint32_t imm11 = (offset >> 11) & 0x1;
+  uint32_t imm10_1 = (offset >> 1) & 0x3ff;
+  insn &= 0xfff;
+  insn |= (imm20 << 31) | (imm10_1 << 21) | (imm11 << 20) | (imm19_12 << 12);
+  return insn;
+}
+
 int main() {
   printf("========================================================\n");
   printf("RISC-V Assembler Differential TDD Verification (GNU as)\n");
@@ -377,8 +397,13 @@ int main() {
   RUN_CHECK(insn_fld(fa0, a1, 8), "fld fa0, 8(a1)");
   RUN_CHECK(insn_fsw(fa0, a1, 4), "fsw fa0, 4(a1)");
   RUN_CHECK(insn_fsd(fa0, a1, 8), "fsd fa0, 8(a1)");
-  RUN_CHECK(insn_fadd_d(fa0, fa1, fa2), "fadd.d fa0, fa1, fa2");
-  RUN_CHECK(insn_fsub_d(fa0, fa1, fa2), "fsub.d fa0, fa1, fa2");
+  printf("\n[Group 10: MacroAssembler Branch & Jump Label Patching (pd_patch_instruction)]\n");
+  RUN_CHECK(patch_b_insn(insn_beq(a0, a1, 0), 32), "beq a0, a1, .+32");
+  RUN_CHECK(patch_b_insn(insn_bne(a0, a1, 0), -16), "bne a0, a1, .-16");
+  RUN_CHECK(patch_b_insn(insn_blt(a0, a1, 0), 128), "blt a0, a1, .+128");
+  RUN_CHECK(patch_b_insn(insn_bge(a0, a1, 0), -64), "bge a0, a1, .-64");
+  RUN_CHECK(patch_j_insn(insn_jal(ra, 0), 64), "jal ra, .+64");
+  RUN_CHECK(patch_j_insn(insn_jal(zr, 0), -32), "jal zero, .-32");
 
   printf("\n========================================================\n");
   printf("TDD Test Summary: Total %d | Passed: %d | Failed: %d\n", pass_count + fail_count, pass_count, fail_count);

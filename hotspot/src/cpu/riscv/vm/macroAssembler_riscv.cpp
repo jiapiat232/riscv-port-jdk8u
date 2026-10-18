@@ -26,6 +26,9 @@
 #include "precompiled.hpp"
 #include "asm/assembler.hpp"
 #include "asm/assembler.inline.hpp"
+#include "memory/barrierSet.hpp"
+#include "memory/cardTableModRefBS.hpp"
+#include "memory/universe.hpp"
 #include "runtime/os.hpp"
 #include "runtime/thread.hpp"
 
@@ -266,6 +269,36 @@ void MacroAssembler::bang_stack_with_offset(int offset) {
   sd(zr, Address(sp, -offset));
 }
 
+void MacroAssembler::push(Register r) {
+  addi(sp, sp, -wordSize);
+  sd(r, Address(sp, 0));
+}
+
+void MacroAssembler::pop(Register r) {
+  ld(r, Address(sp, 0));
+  addi(sp, sp, wordSize);
+}
+
+void MacroAssembler::push(FloatRegister r) {
+  addi(sp, sp, -wordSize);
+  fsd(r, Address(sp, 0));
+}
+
+void MacroAssembler::pop(FloatRegister r) {
+  fld(r, Address(sp, 0));
+  addi(sp, sp, wordSize);
+}
+
+void MacroAssembler::enter() {
+  build_frame(16);
+}
+
+void MacroAssembler::leave() {
+  mv(sp, fp);
+  ld(ra, Address(sp, -8));
+  ld(fp, Address(sp, -16));
+}
+
 // -------------------------------------------------------------
 // Calls and Branches
 // -------------------------------------------------------------
@@ -277,6 +310,135 @@ void MacroAssembler::call(address entry) {
 void MacroAssembler::jmp(address entry) {
   movptr(t0, (intptr_t)entry);
   jalr(zr, t0, 0);
+}
+
+// -------------------------------------------------------------
+// Branch and Jump with Labels
+// -------------------------------------------------------------
+void MacroAssembler::beq(Register rs1, Register rs2, Label& L) {
+  if (L.is_bound()) {
+    int32_t offset = target(L) - pc();
+    Assembler::beq(rs1, rs2, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    Assembler::beq(rs1, rs2, 0);
+  }
+}
+
+void MacroAssembler::bne(Register rs1, Register rs2, Label& L) {
+  if (L.is_bound()) {
+    int32_t offset = target(L) - pc();
+    Assembler::bne(rs1, rs2, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    Assembler::bne(rs1, rs2, 0);
+  }
+}
+
+void MacroAssembler::blt(Register rs1, Register rs2, Label& L) {
+  if (L.is_bound()) {
+    int32_t offset = target(L) - pc();
+    Assembler::blt(rs1, rs2, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    Assembler::blt(rs1, rs2, 0);
+  }
+}
+
+void MacroAssembler::bge(Register rs1, Register rs2, Label& L) {
+  if (L.is_bound()) {
+    int32_t offset = target(L) - pc();
+    Assembler::bge(rs1, rs2, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    Assembler::bge(rs1, rs2, 0);
+  }
+}
+
+void MacroAssembler::bltu(Register rs1, Register rs2, Label& L) {
+  if (L.is_bound()) {
+    int32_t offset = target(L) - pc();
+    Assembler::bltu(rs1, rs2, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    Assembler::bltu(rs1, rs2, 0);
+  }
+}
+
+void MacroAssembler::bgeu(Register rs1, Register rs2, Label& L) {
+  if (L.is_bound()) {
+    int32_t offset = target(L) - pc();
+    Assembler::bgeu(rs1, rs2, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    Assembler::bgeu(rs1, rs2, 0);
+  }
+}
+
+void MacroAssembler::j(Label& L) {
+  if (L.is_bound()) {
+    int32_t offset = target(L) - pc();
+    Assembler::jal(zr, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    Assembler::jal(zr, 0);
+  }
+}
+
+void MacroAssembler::jal(Register rd, Label& L) {
+  if (L.is_bound()) {
+    int32_t offset = target(L) - pc();
+    Assembler::jal(rd, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    Assembler::jal(rd, 0);
+  }
+}
+
+void MacroAssembler::pd_patch_instruction(address branch, address target) {
+  uint32_t insn = *(uint32_t*)branch;
+  int32_t offset = (int32_t)(target - branch);
+  uint32_t opcode = insn & 0x7f;
+  if (opcode == 0x63) { // BRANCH (B-format)
+    assert(is_simm13(offset) && (offset & 1) == 0, "branch offset out of range");
+    uint32_t imm12 = (offset >> 12) & 0x1;
+    uint32_t imm11 = (offset >> 11) & 0x1;
+    uint32_t imm10_5 = (offset >> 5) & 0x3f;
+    uint32_t imm4_1 = (offset >> 1) & 0xf;
+    insn &= ~((1U << 31) | (0x3f << 25) | (0xf << 8) | (1 << 7));
+    insn |= (imm12 << 31) | (imm10_5 << 25) | (imm4_1 << 8) | (imm11 << 7);
+    *(uint32_t*)branch = insn;
+  } else if (opcode == 0x6f) { // JAL (J-format)
+    assert(is_simm21(offset) && (offset & 1) == 0, "jal offset out of range");
+    uint32_t imm20 = (offset >> 20) & 0x1;
+    uint32_t imm19_12 = (offset >> 12) & 0xff;
+    uint32_t imm11 = (offset >> 11) & 0x1;
+    uint32_t imm10_1 = (offset >> 1) & 0x3ff;
+    insn &= 0xfff;
+    insn |= (imm20 << 31) | (imm10_1 << 21) | (imm11 << 20) | (imm19_12 << 12);
+    *(uint32_t*)branch = insn;
+  } else {
+    guarantee(false, "unsupported branch instruction to patch");
+  }
+}
+
+void MacroAssembler::reinit_heapbase() {
+  if (UseCompressedOops || UseCompressedClassPointers) {
+    if (Universe::is_fully_initialized()) {
+      movptr(xheapbase, (intptr_t)Universe::narrow_oop_base());
+    } else {
+      movptr(xheapbase, 0);
+    }
+  }
+}
+
+void MacroAssembler::load_byte_map_base(Register dst) {
+  BarrierSet* bs = Universe::heap()->barrier_set();
+  assert(bs->kind() == BarrierSet::CardTableModRef ||
+         bs->kind() == BarrierSet::CardTableExtension, "wrong barrier set kind");
+  CardTableModRefBS* ct = (CardTableModRefBS*)bs;
+  assert(sizeof(*ct->byte_map_base) == sizeof(jbyte), "adjust this code");
+  movptr(dst, (intptr_t)ct->byte_map_base);
 }
 
 void MacroAssembler::safepoint_poll(Register tmp) {
@@ -409,8 +571,10 @@ void MacroAssembler::call_VM(Register oop_result, Register last_java_sp, address
 void MacroAssembler::null_check(Register reg, int offset) {
   if (needs_explicit_null_check(offset)) {
     // Explicit null check
-    bne(reg, zr, 8); // Skip ebreak if reg != 0
+    Label L;
+    bne(reg, zr, L);
     stop("NullPointerException");
+    bind(L);
   } else {
     // Implicit null check: touch address 0(reg)
     ld(zr, Address(reg, 0));

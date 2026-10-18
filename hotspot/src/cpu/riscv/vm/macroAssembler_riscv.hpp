@@ -52,6 +52,7 @@ class MacroAssembler: public Assembler {
   }
 
   void movptr(Register dst, intptr_t val);
+  void li(Register rd, intptr_t imm) { movptr(rd, imm); }
 
   // -------------------------------------------------------------
   // Memory Operations with Address
@@ -80,16 +81,57 @@ class MacroAssembler: public Assembler {
   void remove_frame(int framesize);
   virtual void bang_stack_with_offset(int offset);
 
+  void push(Register r);
+  void pop(Register r);
+  void push(FloatRegister r);
+  void pop(FloatRegister r);
+  void enter();
+  void leave();
+
   // -------------------------------------------------------------
   // Calls and Jumps
   // -------------------------------------------------------------
   void call(address entry);
   void jmp(address entry);
+  void far_jump(address entry) { jmp(entry); }
 
   // -------------------------------------------------------------
-  // Safepoints and Thread State
+  // Branch and Jump with Labels
+  // -------------------------------------------------------------
+  using Assembler::beq;
+  using Assembler::bne;
+  using Assembler::blt;
+  using Assembler::bge;
+  using Assembler::bltu;
+  using Assembler::bgeu;
+  using Assembler::jal;
+  using Assembler::jalr;
+
+  void beq(Register rs1, Register rs2, Label& L);
+  void bne(Register rs1, Register rs2, Label& L);
+  void blt(Register rs1, Register rs2, Label& L);
+  void bge(Register rs1, Register rs2, Label& L);
+  void bltu(Register rs1, Register rs2, Label& L);
+  void bgeu(Register rs1, Register rs2, Label& L);
+
+  void beqz(Register rs, Label& L) { beq(rs, zr, L); }
+  void bnez(Register rs, Label& L) { bne(rs, zr, L); }
+  void blez(Register rs, Label& L) { bge(zr, rs, L); }
+  void bgez(Register rs, Label& L) { bge(rs, zr, L); }
+  void bltz(Register rs, Label& L) { blt(rs, zr, L); }
+  void bgtz(Register rs, Label& L) { blt(zr, rs, L); }
+
+  void j(Label& L);
+  void jal(Register rd, Label& L);
+
+  static void pd_patch_instruction(address branch, address target);
+
+  // -------------------------------------------------------------
+  // Safepoints, GC and Thread State
   // -------------------------------------------------------------
   void safepoint_poll(Register tmp);
+  void reinit_heapbase();
+  void load_byte_map_base(Register dst);
   void get_thread(Register dst) {
     mv(dst, xthread);
   }

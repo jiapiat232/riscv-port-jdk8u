@@ -35,12 +35,20 @@ static bool returns_to_call_stub(address return_pc) {
 }
 
 enum platform_dependent_constants {
-  code_size1 = 20000,
-  code_size2 = 24000
+  code_size1 = 30000,
+  code_size2 = 40000
 };
 
 class riscv {
   friend class StubGenerator;
+
+ private:
+  static address _zero_longs;
+
+ public:
+  static address get_zero_longs() {
+    return _zero_longs;
+  }
 };
 
 #endif // CPU_RISCV_VM_STUBROUTINES_RISCV_HPP

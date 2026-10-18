@@ -162,6 +162,20 @@ const Register t4       = x29;
 const Register t5       = x30;
 const Register t6       = x31;
 
+// Callee-saved aliases (prefixed with 'x' to avoid globalDefinitions.hpp s1/s2/s4/s8 conflict)
+const Register xs0      = x8;
+const Register xs1      = x9;
+const Register xs2      = x18;
+const Register xs3      = x19;
+const Register xs4      = x20;
+const Register xs5      = x21;
+const Register xs6      = x22;
+const Register xs7      = x23;
+const Register xs8      = x24;
+const Register xs9      = x25;
+const Register xs10     = x26;
+const Register xs11     = x27;
+
 // C calling convention argument aliases
 const Register c_rarg0  = a0;
 const Register c_rarg1  = a1;
