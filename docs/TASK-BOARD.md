@@ -128,15 +128,20 @@
 
 ### 【Sprint Card 1.3】Linux 操作系统与信号处理粘合（OS & Context Glue）
 * **责任模块**：`hotspot/src/os_cpu/linux_riscv/vm/`
-* **状态**：`[ ] 待开始`
+* **状态**：`[x] 已完成`
 * **对应源码清单**：
   * [`hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.hpp)
+  * [`hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.inline.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.inline.hpp)
   * [`hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.cpp)
+  * [`hotspot/src/os_cpu/linux_riscv/vm/vmStructs_linux_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/os_cpu/linux_riscv/vm/vmStructs_linux_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/vmStructs_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/vmStructs_riscv.hpp)
 * **核心验收 Checklist**：
-  - [ ] 适配 Linux RISC-V `ucontext_t` / `sigcontext`，准确提取崩溃点 PC 指针（`uc_mcontext.__gregs[REG_PC]`）；
-  - [ ] 捕获 `SIGSEGV`、`SIGBUS`、`SIGILL`、`SIGFPE` 并转换为 JVM 内部异常处理；
-  - [ ] 实现全局安全点轮询页（Global Safepoint Polling Page）缺页命中判断与跳转；
-  - [ ] 实现 `os::current_frame()` 栈回溯与帧指针遍历。
+  - [x] 适配 Linux RISC-V `ucontext_t` / `sigcontext`，准确提取崩溃点 PC 指针（`uc_mcontext.__gregs[REG_PC]`）；
+  - [x] 捕获 `SIGSEGV`、`SIGBUS`、`SIGILL`、`SIGFPE` 并转换为 JVM 内部异常处理（包含 SafeFetch、Stack Overflow、Implicit Null Check、Implicit DivByZero、Unsafe Access 处理）；
+  - [x] 实现全局安全点轮询页（Global Safepoint Polling Page）缺页命中判断与跳转；
+  - [x] 实现 `os::current_frame()` 栈回溯、`os::get_sender_for_C_frame` 与 `os::fetch_frame_from_context` 帧指针遍历；
+  - [x] 实现 `SpinPause()` 与全套 `_Copy_conjoint_*` 基础内存复制函数；
+  - [x] 经 Docker RISC-V 交叉编译器（GCC 9.4，`-std=gnu++98`）独立编译成合法 RISC-V ELF 目标文件（`JVM_handle_linux_signal` 全局导出）。
 
 ### 【Sprint Card 1.4】核心指令编码器与宏汇编器（Assembler & MacroAssembler）
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
@@ -163,8 +168,8 @@
   - [ ] **TDD 梯队 1（汇编器差分对比）**：以 GNU `riscv64-linux-gnu-as` 为 Oracle，比对 HotSpot 发射的 32 位机器码与标准机器码一致；
   - [ ] **TDD 梯队 2（内存即时执行）**：利用 `BufferBlob` 发射机器码并在 QEMU 中直接执行函数指针，验证运算结果；
   - [ ] **TDD 梯队 3（多线程原子操作单测）**：多线程并发压测 `Atomic::add` 与 `cmpxchg`；
-  - [ ] **编译验收**：运行 `./docker/make.sh hotspot`，增量排错直到 Phase 1 所有目标文件编译通过；
-  - [ ] **符号验证**：验证生成的 `libjvm.so` 中包含合法的 RISC-V ELF 符号。
+  - [x] **编译验收**：运行 `./docker/make.sh hotspot`，增量排错直到 Phase 1 所有目标文件编译通过并成功链接；
+  - [x] **符号验证**：验证生成的 `libjvm.so` 中包含合法的 RISC-V ELF 符号（包含 `JNI_CreateJavaVM`, `JVM_InitProperties` 等）。
 
 ---
 
@@ -345,3 +350,52 @@
 * **核心验收 Checklist**：
   - [ ] `test/hotspot/jtreg` 核心用例通过率 $\ge 99\%$；
   - [ ] 成功运行 SPECjvm2008 与 DaCapo 基准套件，性能曲线平稳，达到生产级发布标准。
+
+---
+
+## 九、OpenJDK 8u RISC-V 移植编码规范与工程原则（Coding Standards & Engineering Rules）
+
+### 1. 语言标准与编译器兼容性（C++98 / gnu++98）
+* **严格遵循 GNU++98 基线**：OpenJDK 8u 的 HotSpot 统一采用 GCC `-std=gnu++98` 编译，**严禁使用任何 C++11 及更高版本语法特性**：
+  - 严禁使用 `auto` 自动类型推导；
+  - 严禁使用 `nullptr`（必须使用 `NULL`）；
+  - 严禁使用 `constexpr`（必须使用 `const static` 或枚举）；
+  - 严禁使用 基于范围的 for 循环（`for (auto x : vec)`）；
+  - 严禁在类声明内直接初始化非静态/非常量成员变量。
+* **跨编译器兼容**：代码需同时满足 GCC 与 Clang 的语法检查要求，杜绝非标准扩展。
+
+### 2. 命名体系与符号定义（Naming Conventions）
+* **类型与类名**：首字母大写的驼峰命名法（`CamelCase`），如 `MacroAssembler`, `RegisterImpl`, `OrderAccess`。
+* **函数与方法名**：小写字母加下划线命名法（`snake_case`），如 `is_safepoint_poll()`, `patch_verified_entry()`。
+* **私有与保护成员变量**：必须强制带有下划线前缀（`_leading_underscore`），如 `_encoding`, `_initialized`, `_cb`。
+* **常量与宏定义**：全大写字母加下划线（`UPPER_SNAKE_CASE`），如 `VM_LITTLE_ENDIAN`, `EM_RISCV`。
+* **架构别名隔离铁律**：避免全局作用域下的简写变量污染，如通用寄存器 `x0` 的别名统一采用 `zr`，**严禁在全局作用域定义 `const Register zero = x0;`**，防止与系统数学函数或外部库变量发生符号冲突。
+
+### 3. 内存管理与对象基类层次（HotSpot Memory Subsystem）
+* **严禁直接调用原生 `malloc` / `free` 或裸 `new` / `delete`**。
+* 所有 C++ 类型必须显式继承自 HotSpot 特定的内存分配基类：
+  - `AllStatic`：全静态工具类（杜绝实例化），如 `OrderAccess`, `Atomic`, `VM_Version`；
+  - `StackObj`：仅允许栈上分配的临时资源类，如资源句柄、保护作用域；
+  - `ResourceObj`：受 `ResourceMark` 统一管辖的临时内存块；
+  - `CHeapObj<mtInternal / mtClass / mtGC>`：从 C 运行时堆分配的常驻元数据结构，带内存统计标记；
+  - `VMObj`：作为嵌入其他结构的对象基类。
+
+### 4. 架构隔离与条件编译宏（Architecture Decoupling）
+* **目录边界清晰划分**：
+  - `hotspot/src/cpu/riscv/vm/`：纯 RISC-V CPU 硬件、寄存器、汇编器与架构特定逻辑；
+  - `hotspot/src/os_cpu/linux_riscv/vm/`：Linux OS 与 RISC-V 交叉粘合层（原子操作、信号捕获、上下文展开）；
+  - `hotspot/src/share/vm/`：共享虚拟机内核，严禁硬编码架构指令。
+* **标准架构条件编译**：
+  - 共享层分支统一使用 [`macros.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/utilities/macros.hpp) 中定义的 `RISCV_ONLY(...)` 与 `NOT_RISCV(...)` 宏；
+  - 针对头文件包含保护，统一遵循 `#ifdef TARGET_ARCH_riscv` 与 `#ifdef TARGET_OS_ARCH_linux_riscv` 标准。
+
+### 5. 并发内存模型与原子操作铁律（RVWMO & AMO Iron Rules）
+* **内存屏障精确映射**：严格依据 RISC-V Weak Memory Ordering (RVWMO) 硬件规范映射：
+  - Acquire 屏障使用 `fence r, rw`（或 `__atomic_thread_fence(__ATOMIC_ACQUIRE)`）；
+  - Release 屏障使用 `fence rw, w`（或 `__atomic_thread_fence(__ATOMIC_RELEASE)`）；
+  - Full Barrier 使用 `fence rw, rw`（或 `__atomic_thread_fence(__ATOMIC_SEQ_CST)`）。
+* **AMO 单指令优先**：在 `Atomic::add` 与 `Atomic::xchg` 中必须首选带 `.aqrl` 属性的原生单指令 AMO（`amoadd.w/d.aqrl`, `amoswap.w/d.aqrl`），坚决杜绝在无竞争高频点使用易发生活锁（Livelock）和缓存行饥饿的 `lr`/`sc` 循环。
+
+### 6. 断言、防御性设计与代码格式化
+* **全量断言护航**：关键路径前置条件与边界条件必须覆盖 `assert(condition, "message")`；涉及虚拟机致命状态判定使用 `guarantee`。
+* **缩进与排版**：统一使用 2 空格缩进，**严禁包含制表符（Tab）**；行宽建议限制在 80~120 字符以内；大括号采用 K&R 风格。
