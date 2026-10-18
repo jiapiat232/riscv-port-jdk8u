@@ -726,6 +726,56 @@ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
 
 ---
 
+### 4.13 C++ 名字查找与隐藏规则（Name Hiding）：派生类宏汇编重载隐藏基类方法
+
+#### 1. 现象
+在 `MacroAssembler` 中增加了立即数版本的 `void subw(Register Rd, Register Rn, int64_t decrement, Register tmp = t0)` 后，在 `templateTable_riscv.cpp` 中调用三寄存器版本 `__ subw(x10, x11, x10);` 报硬错误：
+`error: cannot convert ‘Register’ to ‘int64_t’ for argument ‘3’ to ‘void MacroAssembler::subw(Register, Register, int64_t, Register)’`
+
+#### 2. 根因
+C++ 名字查找规则规定：当派生类声明了一个与基类同名的成员函数时，不论其参数列表是否不同，派生类的同名函数都会在无限定查找中**完全隐藏（Hide）**基类中的所有同名重载版本，基类的 `Assembler::subw(Register, Register, Register)` 不会被纳入候选集合。
+
+#### 3. 解决准则
+在派生类声明中显式通过 `using` 声明将基类的同名重载集引入派生类作用域：
+```cpp
+// macroAssembler_riscv.hpp
+using Assembler::subw;
+void subw(Register Rd, Register Rn, int64_t decrement, Register tmp = t0);
+```
+
+---
+
+### 4.14 共享层与架构层字节码模板符号冲突（Multiple Definition of TemplateTable Methods）
+
+#### 1. 现象
+全量编译完成进入 `Linking vm...` 时，GNU ld 报错：
+`multiple definition of TemplateTable::float_cmp(int); templateTable.o: first defined here`
+`multiple definition of TemplateTable::_goto(); templateTable.o: first defined here`
+包括 `double_cmp(int)`, `goto_w()`, `jsr()`, `jsr_w()` 共 6 个例程重复定义。
+
+#### 2. 根因
+在 JDK 19+ 上游主线中，部分字节码模板的平台独立实现经过了重构或分派转移。但在 OpenJDK 8u 中，共享层 `hotspot/src/share/vm/interpreter/templateTable.cpp` 已经提供了这 6 个字节码的平台独立实现（它们内部调用平台专有的 `float_cmp(bool, int)` 和 `branch(bool, bool)`）。如果架构层源码重写了它们，就会导致目标文件链接冲突。
+
+#### 3. 解决准则
+架构层 `templateTable_<arch>.cpp` 严禁定义这 6 个方法，只需实现底层平台相关的 `float_cmp(bool is_float, int unordered_result)` 与 `branch(bool is_jsr, bool is_wide)`。
+
+---
+
+### 4.15 JDK 8u 与现代 JDK 分支回边计数器（Backedge Counter）掩码模型鸿沟
+
+#### 1. 现象
+移植上游模板解释器的 `branch` 循环回边统计逻辑时，报错：
+`error: ‘backedge_mask_offset’ is not a member of ‘MethodData’ / ‘MethodCounters’`
+
+#### 2. 根因
+现代 JDK 将分层编译回边计数器的动态掩码移入了 `MethodData` 与 `MethodCounters` 实例中，由 VM 统一维护。而在 OpenJDK 8u 中，解释器回边通知的掩码是基于编译选项即时计算的常数：
+`int mask = ((1 << Tier0BackedgeNotifyFreqLog) - 1) << InvocationCounter::count_shift;`
+
+#### 3. 解决准则
+在 `branch(bool is_jsr, bool is_wide)` 中采用 JDK 8u 规范，计算编译期常数掩码，调用 `InterpreterMacroAssembler::increment_mask_and_jump(Address, int, int, Register, Register, bool, Label*)` 进行位与溢出检测与 OSR 跳转。
+
+---
+
 ## 五、新架构移植工程化核对清单（Step-by-Step Checklist）
 
 如果未来要在 OpenJDK 8u 中移植另一个全新的指令集架构（如某个专有 ASIC、DSP 或新一代开放架构），可直接按照本工程总结的核对清单推进 Phase 1：
