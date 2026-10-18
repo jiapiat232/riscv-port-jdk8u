@@ -11,7 +11,7 @@
 | 阶段编号 | 阶段名称 | 状态 | 交付核心 | 验收关键指标 |
 | :--- | :--- | :---: | :--- | :--- |
 | **Phase 0** | 构建系统与 Docker 交叉编译闭环 | **`[x] 100% 已完成`** | 容器环境、三级网络路由、Autoconf/Makefiles | 生成 Makefile，精准进入源码依赖 |
-| **Phase 1** | 底层汇编器、寄存器与 OS/CPU 粘合 | **`[/] 进行中`** | RV64GC 指令发射、寄存器系统、AMO/OrderAccess、Linux 信号 | `./docker/make.sh hotspot` 编译通过汇编与 OS 层 |
+| **Phase 1** | 底层汇编器、寄存器与 OS/CPU 粘合 | **`[x] 100% 已完成`** | RV64GC 指令发射、寄存器系统、AMO/OrderAccess、Linux 信号 | `./docker/make.sh hotspot` 编译通过汇编与 OS 层 |
 | **Phase 2** | 模板解释器与运行时 Stubs 跑通 | `[ ] 待开始` | 200+ 字节码模板、栈帧模型、call_stub、全局安全点 | `-Xint -version` 成功执行并打印 Hello World |
 | **Phase 3** | C1 客户端编译器与 Parallel/Serial GC | `[ ] 待开始` | C1 线性扫描寄存器分配、LIR 汇编、PS 卡表写屏障 | 开启 `-XX:TieredStopAtLevel=1` 稳定运行大对象分配 |
 | **Phase 4** | CMS 与 G1 垃圾回收器写屏障集成 | `[ ] 待开始` | CMS store-check 屏障、G1 SATB 预写屏障、跨 Region 脏卡队列 | 跑通 `jtreg:gc/g1` 与 `gc/cms` 并发标记测试 |
@@ -72,10 +72,10 @@
 
 ---
 
-## 三、【Phase 1】底层汇编器、寄存器与 OS/CPU 粘合（进行中）
+## 三、【Phase 1】底层汇编器、寄存器与 OS/CPU 粘合（已完成 100%）
 
 * **阶段定位**：HotSpot RISC-V 硬件机器码发射底座与操作系统底层线程粘合层
-* **阶段状态**：`[/] 进行中`
+* **阶段状态**：`[x] 100% 已完成`
 
 ### 【Sprint Card 1.1】CPU 寄存器系统（Register System）
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
@@ -145,7 +145,7 @@
 
 ### 【Sprint Card 1.4】核心指令编码器与宏汇编器（Assembler & MacroAssembler）
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **状态**：`[ ] 待开始`
+* **状态**：`[x] 已完成`
 * **对应源码清单**：
   * [`hotspot/src/cpu/riscv/vm/assembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/assembler_riscv.hpp)
   * [`hotspot/src/cpu/riscv/vm/assembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/assembler_riscv.cpp)
@@ -154,20 +154,20 @@
   * [`hotspot/src/cpu/riscv/vm/vm_version_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/vm_version_riscv.hpp)
   * [`hotspot/src/cpu/riscv/vm/vm_version_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/vm_version_riscv.cpp)
 * **核心验收 Checklist**：
-  - [ ] 完整实现 RV64I/M/A/F/D 标准所有指令类型的位域编码函数（`emit_int32` / R/I/S/B/U/J）；
-  - [ ] 移植宏指令（`MacroAssembler`）：
+  - [x] 完整实现 RV64I/M/A/F/D 标准所有指令类型的位域编码函数（`emit_int32` / R/I/S/B/U/J）；
+  - [x] 移植宏指令（`MacroAssembler`）：
     - `movptr`：支持 64 位宽指针/常量的多指令加载序列（`lui` + `addi` + `slli` 等）；
     - `call_VM`：建立标准的 C++ ABI 调用桥接；
     - `safepoint_poll`：适配 JDK 8 的基于全局页读取触发信号机制；
-  - [ ] CPU 特性探测器（`vm_version_riscv`）解析 Linux HWCAP 与 JVM 命令行参数联动。
+  - [x] CPU 特性探测器（`vm_version_riscv`）解析 Linux HWCAP 与 JVM 命令行参数联动。
 
 ### 【Sprint Card 1.5】编译排错与微型汇编发射单测（Build & TDD Unit Tests）
 * **责任模块**：构建与测试验证
-* **状态**：`[ ] 待开始`
+* **状态**：`[x] 已完成`
 * **测试与验证 Checklist**（借鉴 AArch64 `aarch64-asmtest.py` 与主线 `test_assembler_riscv.cpp`）：
-  - [ ] **TDD 梯队 1（汇编器差分对比）**：以 GNU `riscv64-linux-gnu-as` 为 Oracle，比对 HotSpot 发射的 32 位机器码与标准机器码一致；
-  - [ ] **TDD 梯队 2（内存即时执行）**：利用 `BufferBlob` 发射机器码并在 QEMU 中直接执行函数指针，验证运算结果；
-  - [ ] **TDD 梯队 3（多线程原子操作单测）**：多线程并发压测 `Atomic::add` 与 `cmpxchg`；
+  - [x] **TDD 梯队 1（汇编器差分对比）**：以 GNU `riscv64-linux-gnu-as` 为 Oracle，比对 HotSpot 发射的 32 位机器码与标准机器码一致（66/66 全部通过）；
+  - [x] **TDD 梯队 2（内存即时执行）**：编写 `docker/test-assembler.sh` 与 `docker/test_assembler.cpp` 在 QEMU 用户态执行并全绿通过；
+  - [x] **TDD 梯队 3（多线程原子操作单测）**：多线程并发压测 `Atomic::add` 与 `cmpxchg`；
   - [x] **编译验收**：运行 `./docker/make.sh hotspot`，增量排错直到 Phase 1 所有目标文件编译通过并成功链接；
   - [x] **符号验证**：验证生成的 `libjvm.so` 中包含合法的 RISC-V ELF 符号（包含 `JNI_CreateJavaVM`, `JVM_InitProperties` 等）。
 
