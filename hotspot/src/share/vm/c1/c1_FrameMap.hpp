@@ -97,6 +97,9 @@ class FrameMap : public CompilationResourceObj {
 #ifdef TARGET_ARCH_ppc
 # include "c1_FrameMap_ppc.hpp"
 #endif
+#ifdef TARGET_ARCH_riscv
+# include "c1_FrameMap_riscv.hpp"
+#endif
 
 
   friend class LIR_OprDesc;

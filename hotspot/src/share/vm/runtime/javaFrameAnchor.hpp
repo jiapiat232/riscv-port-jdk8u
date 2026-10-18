@@ -95,6 +95,9 @@ friend class JavaCallWrapper;
 #ifdef TARGET_ARCH_ppc
 # include "javaFrameAnchor_ppc.hpp"
 #endif
+#ifdef TARGET_ARCH_riscv
+# include "javaFrameAnchor_riscv.hpp"
+#endif
 
 
 public:

@@ -1,0 +1,318 @@
+//
+// Copyright (c) 2020, 2022, Huawei Technologies Co., Ltd. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+
+source %{
+
+int HandlerImpl::emit_exception_handler(CodeBuffer& cbuf) {
+  return cbuf.insts_size();
+}
+
+int HandlerImpl::emit_deopt_handler(CodeBuffer& cbuf) {
+  return cbuf.insts_size();
+}
+
+%}
+
+source_hpp %{
+
+class CallStubImpl {
+ public:
+  static uint size_call_trampoline() {
+    return 0;
+  }
+  static uint reloc_call_trampoline() {
+    return 0;
+  }
+};
+
+class HandlerImpl {
+ public:
+  static int emit_exception_handler(CodeBuffer &cbuf);
+  static int emit_deopt_handler(CodeBuffer& cbuf);
+
+  static uint size_exception_handler() {
+    return 16;
+  }
+
+  static uint size_deopt_handler() {
+    return 20;
+  }
+};
+
+%}
+
+register %{
+  // General Registers
+  reg_def R0   ( NS,  NS,  Op_RegI, 0,  x0->as_VMReg()         );
+  reg_def R0_H ( NS,  NS,  Op_RegI, 0,  x0->as_VMReg()->next() );
+  reg_def R1   ( NS,  SOC, Op_RegI, 1,  x1->as_VMReg()         );
+  reg_def R1_H ( NS,  SOC, Op_RegI, 1,  x1->as_VMReg()->next() );
+  reg_def R2   ( NS,  NS,  Op_RegI, 2,  x2->as_VMReg()         );
+  reg_def R2_H ( NS,  NS,  Op_RegI, 2,  x2->as_VMReg()->next() );
+  reg_def R3   ( NS,  NS,  Op_RegI, 3,  x3->as_VMReg()         );
+  reg_def R3_H ( NS,  NS,  Op_RegI, 3,  x3->as_VMReg()->next() );
+  reg_def R4   ( NS,  NS,  Op_RegI, 4,  x4->as_VMReg()         );
+  reg_def R4_H ( NS,  NS,  Op_RegI, 4,  x4->as_VMReg()->next() );
+  reg_def R5   ( SOC, SOC, Op_RegI, 5,  x5->as_VMReg()         );
+  reg_def R5_H ( SOC, SOC, Op_RegI, 5,  x5->as_VMReg()->next() );
+  reg_def R6   ( SOC, SOC, Op_RegI, 6,  x6->as_VMReg()         );
+  reg_def R6_H ( SOC, SOC, Op_RegI, 6,  x6->as_VMReg()->next() );
+  reg_def R7   ( SOC, SOC, Op_RegI, 7,  x7->as_VMReg()         );
+  reg_def R7_H ( SOC, SOC, Op_RegI, 7,  x7->as_VMReg()->next() );
+  reg_def R8   ( NS,  SOE, Op_RegI, 8,  x8->as_VMReg()         );
+  reg_def R8_H ( NS,  SOE, Op_RegI, 8,  x8->as_VMReg()->next() );
+  reg_def R9   ( SOC, SOE, Op_RegI, 9,  x9->as_VMReg()         );
+  reg_def R9_H ( SOC, SOE, Op_RegI, 9,  x9->as_VMReg()->next() );
+  reg_def R10  ( SOC, SOC, Op_RegI, 10, x10->as_VMReg()        );
+  reg_def R10_H( SOC, SOC, Op_RegI, 10, x10->as_VMReg()->next());
+  reg_def R11  ( SOC, SOC, Op_RegI, 11, x11->as_VMReg()        );
+  reg_def R11_H( SOC, SOC, Op_RegI, 11, x11->as_VMReg()->next());
+  reg_def R12  ( SOC, SOC, Op_RegI, 12, x12->as_VMReg()        );
+  reg_def R12_H( SOC, SOC, Op_RegI, 12, x12->as_VMReg()->next());
+  reg_def R13  ( SOC, SOC, Op_RegI, 13, x13->as_VMReg()        );
+  reg_def R13_H( SOC, SOC, Op_RegI, 13, x13->as_VMReg()->next());
+  reg_def R14  ( SOC, SOC, Op_RegI, 14, x14->as_VMReg()        );
+  reg_def R14_H( SOC, SOC, Op_RegI, 14, x14->as_VMReg()->next());
+  reg_def R15  ( SOC, SOC, Op_RegI, 15, x15->as_VMReg()        );
+  reg_def R15_H( SOC, SOC, Op_RegI, 15, x15->as_VMReg()->next());
+  reg_def R16  ( SOC, SOC, Op_RegI, 16, x16->as_VMReg()        );
+  reg_def R16_H( SOC, SOC, Op_RegI, 16, x16->as_VMReg()->next());
+  reg_def R17  ( SOC, SOC, Op_RegI, 17, x17->as_VMReg()        );
+  reg_def R17_H( SOC, SOC, Op_RegI, 17, x17->as_VMReg()->next());
+  reg_def R18  ( SOC, SOE, Op_RegI, 18, x18->as_VMReg()        );
+  reg_def R18_H( SOC, SOE, Op_RegI, 18, x18->as_VMReg()->next());
+  reg_def R19  ( SOC, SOE, Op_RegI, 19, x19->as_VMReg()        );
+  reg_def R19_H( SOC, SOE, Op_RegI, 19, x19->as_VMReg()->next());
+  reg_def R20  ( SOC, SOE, Op_RegI, 20, x20->as_VMReg()        );
+  reg_def R20_H( SOC, SOE, Op_RegI, 20, x20->as_VMReg()->next());
+  reg_def R21  ( SOC, SOE, Op_RegI, 21, x21->as_VMReg()        );
+  reg_def R21_H( SOC, SOE, Op_RegI, 21, x21->as_VMReg()->next());
+  reg_def R22  ( SOC, SOE, Op_RegI, 22, x22->as_VMReg()        );
+  reg_def R22_H( SOC, SOE, Op_RegI, 22, x22->as_VMReg()->next());
+  reg_def R23  ( NS,  SOE, Op_RegI, 23, x23->as_VMReg()        ); // xthread
+  reg_def R23_H( NS,  SOE, Op_RegI, 23, x23->as_VMReg()->next());
+  reg_def R24  ( SOC, SOE, Op_RegI, 24, x24->as_VMReg()        );
+  reg_def R24_H( SOC, SOE, Op_RegI, 24, x24->as_VMReg()->next());
+  reg_def R25  ( SOC, SOE, Op_RegI, 25, x25->as_VMReg()        );
+  reg_def R25_H( SOC, SOE, Op_RegI, 25, x25->as_VMReg()->next());
+  reg_def R26  ( SOC, SOE, Op_RegI, 26, x26->as_VMReg()        );
+  reg_def R26_H( SOC, SOE, Op_RegI, 26, x26->as_VMReg()->next());
+  reg_def R27  ( NS,  SOE, Op_RegI, 27, x27->as_VMReg()        ); // xheapbase
+  reg_def R27_H( NS,  SOE, Op_RegI, 27, x27->as_VMReg()->next());
+  reg_def R28  ( SOC, SOC, Op_RegI, 28, x28->as_VMReg()        );
+  reg_def R28_H( SOC, SOC, Op_RegI, 28, x28->as_VMReg()->next());
+  reg_def R29  ( SOC, SOC, Op_RegI, 29, x29->as_VMReg()        );
+  reg_def R29_H( SOC, SOC, Op_RegI, 29, x29->as_VMReg()->next());
+  reg_def R30  ( SOC, SOC, Op_RegI, 30, x30->as_VMReg()        );
+  reg_def R30_H( SOC, SOC, Op_RegI, 30, x30->as_VMReg()->next());
+  reg_def R31  ( SOC, SOC, Op_RegI, 31, x31->as_VMReg()        );
+  reg_def R31_H( SOC, SOC, Op_RegI, 31, x31->as_VMReg()->next());
+
+  // Floating Point Registers
+  reg_def F0   ( SOC, SOC, Op_RegF, 0,  f0->as_VMReg()         );
+  reg_def F0_H ( SOC, SOC, Op_RegF, 0,  f0->as_VMReg()->next() );
+  reg_def F1   ( SOC, SOC, Op_RegF, 1,  f1->as_VMReg()         );
+  reg_def F1_H ( SOC, SOC, Op_RegF, 1,  f1->as_VMReg()->next() );
+  reg_def F2   ( SOC, SOC, Op_RegF, 2,  f2->as_VMReg()         );
+  reg_def F2_H ( SOC, SOC, Op_RegF, 2,  f2->as_VMReg()->next() );
+  reg_def F3   ( SOC, SOC, Op_RegF, 3,  f3->as_VMReg()         );
+  reg_def F3_H ( SOC, SOC, Op_RegF, 3,  f3->as_VMReg()->next() );
+  reg_def F4   ( SOC, SOC, Op_RegF, 4,  f4->as_VMReg()         );
+  reg_def F4_H ( SOC, SOC, Op_RegF, 4,  f4->as_VMReg()->next() );
+  reg_def F5   ( SOC, SOC, Op_RegF, 5,  f5->as_VMReg()         );
+  reg_def F5_H ( SOC, SOC, Op_RegF, 5,  f5->as_VMReg()->next() );
+  reg_def F6   ( SOC, SOC, Op_RegF, 6,  f6->as_VMReg()         );
+  reg_def F6_H ( SOC, SOC, Op_RegF, 6,  f6->as_VMReg()->next() );
+  reg_def F7   ( SOC, SOC, Op_RegF, 7,  f7->as_VMReg()         );
+  reg_def F7_H ( SOC, SOC, Op_RegF, 7,  f7->as_VMReg()->next() );
+  reg_def F8   ( SOC, SOE, Op_RegF, 8,  f8->as_VMReg()         );
+  reg_def F8_H ( SOC, SOE, Op_RegF, 8,  f8->as_VMReg()->next() );
+  reg_def F9   ( SOC, SOE, Op_RegF, 9,  f9->as_VMReg()         );
+  reg_def F9_H ( SOC, SOE, Op_RegF, 9,  f9->as_VMReg()->next() );
+  reg_def F10  ( SOC, SOC, Op_RegF, 10, f10->as_VMReg()        );
+  reg_def F10_H( SOC, SOC, Op_RegF, 10, f10->as_VMReg()->next());
+  reg_def F11  ( SOC, SOC, Op_RegF, 11, f11->as_VMReg()        );
+  reg_def F11_H( SOC, SOC, Op_RegF, 11, f11->as_VMReg()->next());
+  reg_def F12  ( SOC, SOC, Op_RegF, 12, f12->as_VMReg()        );
+  reg_def F12_H( SOC, SOC, Op_RegF, 12, f12->as_VMReg()->next());
+  reg_def F13  ( SOC, SOC, Op_RegF, 13, f13->as_VMReg()        );
+  reg_def F13_H( SOC, SOC, Op_RegF, 13, f13->as_VMReg()->next());
+  reg_def F14  ( SOC, SOC, Op_RegF, 14, f14->as_VMReg()        );
+  reg_def F14_H( SOC, SOC, Op_RegF, 14, f14->as_VMReg()->next());
+  reg_def F15  ( SOC, SOC, Op_RegF, 15, f15->as_VMReg()        );
+  reg_def F15_H( SOC, SOC, Op_RegF, 15, f15->as_VMReg()->next());
+  reg_def F16  ( SOC, SOC, Op_RegF, 16, f16->as_VMReg()        );
+  reg_def F16_H( SOC, SOC, Op_RegF, 16, f16->as_VMReg()->next());
+  reg_def F17  ( SOC, SOC, Op_RegF, 17, f17->as_VMReg()        );
+  reg_def F17_H( SOC, SOC, Op_RegF, 17, f17->as_VMReg()->next());
+  reg_def F18  ( SOC, SOE, Op_RegF, 18, f18->as_VMReg()        );
+  reg_def F18_H( SOC, SOE, Op_RegF, 18, f18->as_VMReg()->next());
+  reg_def F19  ( SOC, SOE, Op_RegF, 19, f19->as_VMReg()        );
+  reg_def F19_H( SOC, SOE, Op_RegF, 19, f19->as_VMReg()->next());
+  reg_def F20  ( SOC, SOE, Op_RegF, 20, f20->as_VMReg()        );
+  reg_def F20_H( SOC, SOE, Op_RegF, 20, f20->as_VMReg()->next());
+  reg_def F21  ( SOC, SOE, Op_RegF, 21, f21->as_VMReg()        );
+  reg_def F21_H( SOC, SOE, Op_RegF, 21, f21->as_VMReg()->next());
+  reg_def F22  ( SOC, SOE, Op_RegF, 22, f22->as_VMReg()        );
+  reg_def F22_H( SOC, SOE, Op_RegF, 22, f22->as_VMReg()->next());
+  reg_def F23  ( SOC, SOE, Op_RegF, 23, f23->as_VMReg()        );
+  reg_def F23_H( SOC, SOE, Op_RegF, 23, f23->as_VMReg()->next());
+  reg_def F24  ( SOC, SOE, Op_RegF, 24, f24->as_VMReg()        );
+  reg_def F24_H( SOC, SOE, Op_RegF, 24, f24->as_VMReg()->next());
+  reg_def F25  ( SOC, SOE, Op_RegF, 25, f25->as_VMReg()        );
+  reg_def F25_H( SOC, SOE, Op_RegF, 25, f25->as_VMReg()->next());
+  reg_def F26  ( SOC, SOE, Op_RegF, 26, f26->as_VMReg()        );
+  reg_def F26_H( SOC, SOE, Op_RegF, 26, f26->as_VMReg()->next());
+  reg_def F27  ( SOC, SOE, Op_RegF, 27, f27->as_VMReg()        );
+  reg_def F27_H( SOC, SOE, Op_RegF, 27, f27->as_VMReg()->next());
+  reg_def F28  ( SOC, SOC, Op_RegF, 28, f28->as_VMReg()        );
+  reg_def F28_H( SOC, SOC, Op_RegF, 28, f28->as_VMReg()->next());
+  reg_def F29  ( SOC, SOC, Op_RegF, 29, f29->as_VMReg()        );
+  reg_def F29_H( SOC, SOC, Op_RegF, 29, f29->as_VMReg()->next());
+  reg_def F30  ( SOC, SOC, Op_RegF, 30, f30->as_VMReg()        );
+  reg_def F30_H( SOC, SOC, Op_RegF, 30, f30->as_VMReg()->next());
+  reg_def F31  ( SOC, SOC, Op_RegF, 31, f31->as_VMReg()        );
+  reg_def F31_H( SOC, SOC, Op_RegF, 31, f31->as_VMReg()->next());
+
+  alloc_class chunk0(
+    R0, R0_H, R1, R1_H, R2, R2_H, R3, R3_H, R4, R4_H, R5, R5_H, R6, R6_H, R7, R7_H,
+    R8, R8_H, R9, R9_H, R10, R10_H, R11, R11_H, R12, R12_H, R13, R13_H, R14, R14_H, R15, R15_H,
+    R16, R16_H, R17, R17_H, R18, R18_H, R19, R19_H, R20, R20_H, R21, R21_H, R22, R22_H, R23, R23_H,
+    R24, R24_H, R25, R25_H, R26, R26_H, R27, R27_H, R28, R28_H, R29, R29_H, R30, R30_H, R31, R31_H
+  );
+
+  alloc_class chunk1(
+    F0, F0_H, F1, F1_H, F2, F2_H, F3, F3_H, F4, F4_H, F5, F5_H, F6, F6_H, F7, F7_H,
+    F8, F8_H, F9, F9_H, F10, F10_H, F11, F11_H, F12, F12_H, F13, F13_H, F14, F14_H, F15, F15_H,
+    F16, F16_H, F17, F17_H, F18, F18_H, F19, F19_H, F20, F20_H, F21, F21_H, F22, F22_H, F23, F23_H,
+    F24, F24_H, F25, F25_H, F26, F26_H, F27, F27_H, F28, F28_H, F29, F29_H, F30, F30_H, F31, F31_H
+  );
+
+  reg_class all_reg(
+    R0, R0_H, R1, R1_H, R2, R2_H, R3, R3_H, R4, R4_H, R5, R5_H, R6, R6_H, R7, R7_H,
+    R8, R8_H, R9, R9_H, R10, R10_H, R11, R11_H, R12, R12_H, R13, R13_H, R14, R14_H, R15, R15_H,
+    R16, R16_H, R17, R17_H, R18, R18_H, R19, R19_H, R20, R20_H, R21, R21_H, R22, R22_H, R23, R23_H,
+    R24, R24_H, R25, R25_H, R26, R26_H, R27, R27_H, R28, R28_H, R29, R29_H, R30, R30_H, R31, R31_H
+  );
+
+  reg_class all_freg(
+    F0, F0_H, F1, F1_H, F2, F2_H, F3, F3_H, F4, F4_H, F5, F5_H, F6, F6_H, F7, F7_H,
+    F8, F8_H, F9, F9_H, F10, F10_H, F11, F11_H, F12, F12_H, F13, F13_H, F14, F14_H, F15, F15_H,
+    F16, F16_H, F17, F17_H, F18, F18_H, F19, F19_H, F20, F20_H, F21, F21_H, F22, F22_H, F23, F23_H,
+    F24, F24_H, F25, F25_H, F26, F26_H, F27, F27_H, F28, F28_H, F29, F29_H, F30, F30_H, F31, F31_H
+  );
+
+  reg_class int_reg(R10, R10_H, R11, R11_H, R12, R12_H, R13, R13_H, R14, R14_H, R15, R15_H, R16, R16_H, R17, R17_H);
+  reg_class ptr_reg(R10, R10_H, R11, R11_H, R12, R12_H, R13, R13_H, R14, R14_H, R15, R15_H, R16, R16_H, R17, R17_H);
+%}
+
+frame %{
+  stack_direction(TOWARDS_LOW);
+  inline_cache_reg(R31);
+  interpreter_method_oop_reg(R12);
+  sync_stack_slots(2);
+  frame_pointer(R8);
+  interpreter_frame_pointer(R8);
+  c_frame_pointer(R2);
+  stack_alignment(StackAlignmentInBytes);
+  in_preserve_stack_slots(4);
+  varargs_C_out_slots_killed(0);
+  return_addr(STACK - 2);
+
+  calling_convention %{
+    SharedRuntime::java_calling_convention(sig_bt, regs, length, false);
+  %}
+
+  c_calling_convention %{
+    (void) SharedRuntime::c_calling_convention(sig_bt, regs, NULL, length);
+  %}
+
+  return_value %{
+    assert(ideal_reg >= Op_RegI && ideal_reg <= Op_RegL, "only return normal values");
+    static const int lo[Op_RegL + 1] = {
+      0, 0,
+      R10_num,
+      R10_num,
+      R10_num,
+      F10_num,
+      F10_num,
+      R10_num
+    };
+    static const int hi[Op_RegL + 1] = {
+      0, 0,
+      OptoReg::Bad,
+      OptoReg::Bad,
+      R10_H_num,
+      OptoReg::Bad,
+      F10_H_num,
+      R10_H_num
+    };
+    return OptoRegPair(hi[ideal_reg], lo[ideal_reg]);
+  %}
+
+  c_return_value %{
+    assert(ideal_reg >= Op_RegI && ideal_reg <= Op_RegL, "only return normal values");
+    static const int lo[Op_RegL + 1] = {
+      0, 0,
+      R10_num,
+      R10_num,
+      R10_num,
+      F10_num,
+      F10_num,
+      R10_num
+    };
+    static const int hi[Op_RegL + 1] = {
+      0, 0,
+      OptoReg::Bad,
+      OptoReg::Bad,
+      R10_H_num,
+      OptoReg::Bad,
+      F10_H_num,
+      R10_H_num
+    };
+    return OptoRegPair(hi[ideal_reg], lo[ideal_reg]);
+  %}
+%}
+
+op_attrib op_cost(0);
+ins_attrib ins_cost(100);
+ins_attrib ins_size(4);
+ins_attrib ins_short_branch(0);
+ins_attrib ins_alignment(4);
+
+encode %{
+%}
+
+pipeline %{
+  attributes %{
+    variable_size_instructions;
+    instruction_unit_size = 2;
+    max_instructions_per_bundle = 4;
+    instruction_fetch_unit_size = 64;
+    instruction_fetch_units = 1;
+    nops( MachNop );
+  %}
+
+  resources( INS0, INS1 );
+  pipe_desc( S0, S1, S2, S3, S4, S5 );
+
+  pipe_class pipe_default() %{
+    single_instruction;
+  %}
+%}
+
+operand iRegI() %{
+  constraint(ALLOC_IN_RC(int_reg));
+  match(RegI);
+  format %{ %}
+  interface(REG_INTER);
+%}
+
+instruct nopNode() %{
+  format %{ "nop" %}
+  ins_encode %{
+  %}
+  ins_pipe(pipe_default);
+%}

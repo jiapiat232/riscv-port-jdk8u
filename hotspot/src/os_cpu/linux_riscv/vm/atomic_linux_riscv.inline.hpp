@@ -29,6 +29,7 @@
 
 #include "runtime/atomic.hpp"
 #include "runtime/os.hpp"
+#include "vm_version_riscv.hpp"
 
 // Implementation of class atomic for RISC-V.
 //

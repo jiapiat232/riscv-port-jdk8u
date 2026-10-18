@@ -1,0 +1,61 @@
+/*
+ * Copyright (c) 2003, 2026, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2022, Huawei Technologies Co., Ltd. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+ * or visit www.oracle.com if you need additional information or have any
+ * questions.
+ *
+ */
+
+#ifndef CPU_RISCV_VM_INTERP_MASM_RISCV_HPP
+#define CPU_RISCV_VM_INTERP_MASM_RISCV_HPP
+
+#include "asm/macroAssembler.hpp"
+#include "interpreter/invocationCounter.hpp"
+#include "runtime/frame.hpp"
+
+class InterpreterMacroAssembler: public MacroAssembler {
+ public:
+  InterpreterMacroAssembler(CodeBuffer* code) : MacroAssembler(code) {}
+
+  void pop(TosState state) {}
+  void push(TosState state) {}
+  void pop_ptr(Register r = x10) {}
+  void pop_i(Register r = x10) {}
+  void pop_l(Register r = x10) {}
+  void pop_f(FloatRegister r = f10) {}
+  void pop_d(FloatRegister r = f10) {}
+  void push_ptr(Register r = x10) {}
+  void push_i(Register r = x10) {}
+  void push_l(Register r = x10) {}
+  void push_f(FloatRegister r = f10) {}
+  void push_d(FloatRegister r = f10) {}
+
+  void verify_FPU(int stack_depth, TosState state = ftos) {}
+  void verify_method_data_pointer() {}
+  void dispatch_prolog(TosState state, int step = 0) {}
+  void dispatch_epilog(TosState state, int step = 0) {}
+  void dispatch_only(TosState state) {}
+  void dispatch_only_normal(TosState state) {}
+  void dispatch_only_noverify(TosState state) {}
+  void dispatch_next(TosState state, int step = 0) {}
+  void dispatch_via(TosState state, address* table) {}
+};
+
+#endif // CPU_RISCV_VM_INTERP_MASM_RISCV_HPP

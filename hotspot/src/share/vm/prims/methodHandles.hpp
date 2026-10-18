@@ -198,6 +198,9 @@ public:
 #ifdef TARGET_ARCH_ppc
 # include "methodHandles_ppc.hpp"
 #endif
+#ifdef TARGET_ARCH_riscv
+# include "methodHandles_riscv.hpp"
+#endif
 
   // Tracing
   static void trace_method_handle(MacroAssembler* _masm, const char* adaptername) PRODUCT_RETURN;

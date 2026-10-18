@@ -1,0 +1,79 @@
+/*
+ * Copyright (c) 1997, 2026, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2022, Huawei Technologies Co., Ltd. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+ * or visit www.oracle.com if you need additional information or have any
+ * questions.
+ *
+ */
+
+#ifndef CPU_RISCV_VM_MACROASSEMBLER_RISCV_HPP
+#define CPU_RISCV_VM_MACROASSEMBLER_RISCV_HPP
+
+#include "asm/assembler.hpp"
+#include "asm/assembler.inline.hpp"
+
+class MacroAssembler: public Assembler {
+ public:
+  enum {
+    instruction_size = 4,
+    compressed_instruction_size = 2
+  };
+
+  MacroAssembler(CodeBuffer* code) : Assembler(code) {}
+
+  void align(int modulus) {
+    while (offset() % modulus != 0) {
+      emit_int32(0x00000013); // nop: addi x0, x0, 0
+    }
+  }
+
+  void nop() {
+    emit_int32(0x00000013); // addi x0, x0, 0
+  }
+
+  void verify_oop(Register reg, const char* s = "bad oop") PRODUCT_RETURN;
+  void verify_oop_addr(Address addr, const char* s = "bad oop") PRODUCT_RETURN;
+
+  virtual void null_check(Register reg, int offset = -1);
+  static bool needs_explicit_null_check(intptr_t offset);
+  static bool uses_implicit_null_check(void* address);
+  void build_frame(int framesize);
+
+  void stop(const char* msg) {
+    emit_int32(0x00000073); // ecall / ebreak
+  }
+  void warn(const char* msg) {}
+  void untested() { stop("untested"); }
+  void unimplemented(const char* what = "") { stop(what); }
+  void should_not_reach_here() { stop("should not reach here"); }
+
+  // call_VM overloads
+  void call_VM(Register oop_result, address entry_point, bool check_exceptions = true) {}
+  void call_VM(Register oop_result, address entry_point, Register arg_1, bool check_exceptions = true) {}
+  void call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, bool check_exceptions = true) {}
+  void call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, Register arg_3, bool check_exceptions = true) {}
+
+  void call_VM(Register oop_result, Register last_java_sp, address entry_point, int number_of_arguments = 0, bool check_exceptions = true) {}
+  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, bool check_exceptions = true) {}
+  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, Register arg_2, bool check_exceptions = true) {}
+  void call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, Register arg_2, Register arg_3, bool check_exceptions = true) {}
+};
+
+#endif // CPU_RISCV_VM_MACROASSEMBLER_RISCV_HPP

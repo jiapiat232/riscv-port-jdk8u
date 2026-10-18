@@ -67,7 +67,7 @@ FloatRegister LIR_OprDesc::as_double_reg() const {
 
 #endif
 
-#if defined(ARM) || defined(AARCH64)
+#if defined(ARM) || defined(AARCH64) || defined(TARGET_ARCH_riscv)
 
 FloatRegister LIR_OprDesc::as_float_reg() const {
   return as_FloatRegister(fpu_regnr());

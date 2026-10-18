@@ -337,6 +337,7 @@ ADD_SA_BINARIES/ppc   =
 ADD_SA_BINARIES/ia64  =
 ADD_SA_BINARIES/arm   =
 ADD_SA_BINARIES/zero  =
+ADD_SA_BINARIES/riscv =
 
 -include $(HS_ALT_MAKE)/linux/makefiles/defs.make
 

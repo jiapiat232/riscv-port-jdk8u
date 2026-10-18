@@ -29,6 +29,7 @@
 #define CPU_RISCV_VM_REGISTER_RISCV_HPP
 
 #include "asm/register.hpp"
+#include "vm_version_riscv.hpp"
 #include "utilities/top.hpp"
 
 // CSR (Control and Status Register) addresses
@@ -140,7 +141,6 @@ CONSTANT_REGISTER_DECLARATION(Register, x31,  (31));
 
 // Standard RISC-V ABI aliases
 const Register zr       = x0;
-const Register zero     = x0;
 const Register ra       = x1;
 const Register sp       = x2;
 const Register gp       = x3;
@@ -148,9 +148,7 @@ const Register tp       = x4;
 const Register t0       = x5;
 const Register t1       = x6;
 const Register t2       = x7;
-const Register s0       = x8;
 const Register fp       = x8;
-const Register s1       = x9;
 const Register a0       = x10;
 const Register a1       = x11;
 const Register a2       = x12;
@@ -159,16 +157,6 @@ const Register a4       = x14;
 const Register a5       = x15;
 const Register a6       = x16;
 const Register a7       = x17;
-const Register s2       = x18;
-const Register s3       = x19;
-const Register s4       = x20;
-const Register s5       = x21;
-const Register s6       = x22;
-const Register s7       = x23;
-const Register s8       = x24;
-const Register s9       = x25;
-const Register s10      = x26;
-const Register s11      = x27;
 const Register t3       = x28;
 const Register t4       = x29;
 const Register t5       = x30;
@@ -349,10 +337,13 @@ const FloatRegister j_farg7 = c_farg7;
 class ConcreteRegisterImpl : public AbstractRegisterImpl {
  public:
   enum {
-    max_gpr = RegisterImpl::number_of_registers << 1,
-    max_fpr = max_gpr + (FloatRegisterImpl::number_of_registers << 1),
-    number_of_registers = max_fpr + 1 // +1 for flags
+    number_of_registers = (2 * RegisterImpl::number_of_registers +
+                           2 * FloatRegisterImpl::number_of_registers +
+                           1) // flags
   };
+
+  static const int max_gpr;
+  static const int max_fpr;
 };
 
 // Bitset for managing groups of registers

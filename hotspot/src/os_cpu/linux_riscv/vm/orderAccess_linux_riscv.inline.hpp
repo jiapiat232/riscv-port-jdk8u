@@ -31,6 +31,7 @@
 #include "runtime/atomic.inline.hpp"
 #include "runtime/orderAccess.hpp"
 #include "runtime/os.hpp"
+#include "vm_version_riscv.hpp"
 
 // Implementation of class OrderAccess for RISC-V.
 //

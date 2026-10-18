@@ -55,6 +55,9 @@
 #ifdef TARGET_ARCH_ppc
 # include "globals_ppc.hpp"
 #endif
+#ifdef TARGET_ARCH_riscv
+# include "globals_riscv.hpp"
+#endif
 #ifdef TARGET_OS_FAMILY_linux
 # include "globals_linux.hpp"
 #endif
@@ -75,6 +78,9 @@
 #endif
 #ifdef TARGET_OS_ARCH_linux_aarch64
 # include "globals_linux_aarch64.hpp"
+#endif
+#ifdef TARGET_OS_ARCH_linux_riscv
+# include "globals_linux_riscv.hpp"
 #endif
 #ifdef TARGET_OS_ARCH_linux_sparc
 # include "globals_linux_sparc.hpp"
@@ -153,6 +159,9 @@
 #endif
 #ifdef TARGET_ARCH_ppc
 # include "c2_globals_ppc.hpp"
+#endif
+#ifdef TARGET_ARCH_riscv
+# include "c2_globals_riscv.hpp"
 #endif
 #ifdef TARGET_OS_FAMILY_linux
 # include "c2_globals_linux.hpp"

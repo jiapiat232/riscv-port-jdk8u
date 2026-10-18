@@ -62,6 +62,9 @@ class C1_MacroAssembler: public MacroAssembler {
 #ifdef TARGET_ARCH_ppc
 # include "c1_MacroAssembler_ppc.hpp"
 #endif
+#ifdef TARGET_ARCH_riscv
+# include "c1_MacroAssembler_riscv.hpp"
+#endif
 
 };
 
