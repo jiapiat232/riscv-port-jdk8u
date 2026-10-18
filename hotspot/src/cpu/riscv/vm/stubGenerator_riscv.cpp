@@ -338,8 +338,8 @@ class StubGenerator: public StubCodeGenerator {
     }
 #endif
 
-    // Save throwing PC across VM call in callee-saved xs2 (x18)
-    __ mv(xs2, ra);
+    // Save throwing PC across VM call in callee-saved x9
+    __ mv(x9, ra);
 
     // Call runtime to find handler address
     __ call_VM_leaf(CAST_FROM_FN_PTR(address,
@@ -349,8 +349,8 @@ class StubGenerator: public StubCodeGenerator {
     // Handler returned in a0; move to t1
     __ mv(t1, a0);
     // Restore throwing PC
-    __ mv(ra, xs2);
-    __ mv(a3, xs2);
+    __ mv(ra, x9);
+    __ mv(a3, x9);
 
     // Load exception and clear pending exception
     __ ld(a0, Address(xthread, in_bytes(Thread::pending_exception_offset())));
