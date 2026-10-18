@@ -198,6 +198,10 @@ void InterpreterMacroAssembler::jump_from_interpreted(Register method, Register 
   jr(temp);
 }
 
+void InterpreterMacroAssembler::get_dispatch() {
+  movptr(xdispatch, (intptr_t)Interpreter::dispatch_table());
+}
+
 void InterpreterMacroAssembler::dispatch_base(TosState state, address* table, bool verifyoop) {
   movptr(t1, (intptr_t)table);
   slli(t2, t0, LogBytesPerWord);
@@ -317,6 +321,164 @@ void InterpreterMacroAssembler::remove_activation(TosState state,
 
 void InterpreterMacroAssembler::update_mdp_for_ret(Register return_bci) {
   // Profiling support for ret bytecode
+}
+
+void InterpreterMacroAssembler::set_method_data_pointer_for_bcp() {
+  assert(ProfileInterpreter, "must be profiling interpreter");
+  Label set_mdp;
+  subi(sp, sp, 2 * wordSize);
+  sd(x10, Address(sp, 0));
+  sd(x11, Address(sp, wordSize));
+
+  ld(x10, Address(xmethod, in_bytes(Method::method_data_offset())));
+  beqz(x10, set_mdp);
+  call_VM_leaf(CAST_FROM_FN_PTR(address, InterpreterRuntime::bcp_to_di), xmethod, xbcp);
+  ld(x11, Address(xmethod, in_bytes(Method::method_data_offset())));
+  addi(x11, x11, in_bytes(MethodData::data_offset()));
+  add(x10, x11, x10);
+  sd(x10, Address(fp, frame::interpreter_frame_mdx_offset * wordSize));
+
+  bind(set_mdp);
+  ld(x10, Address(sp, 0));
+  ld(x11, Address(sp, wordSize));
+  addi(sp, sp, 2 * wordSize);
+}
+
+void InterpreterMacroAssembler::test_method_data_pointer(Register mdp, Label& zero_continue) {
+  assert(ProfileInterpreter, "must be profiling interpreter");
+  ld(mdp, Address(fp, frame::interpreter_frame_mdx_offset * wordSize));
+  beqz(mdp, zero_continue);
+}
+
+void InterpreterMacroAssembler::increment_mask_and_jump(Address counter_addr,
+                                                        int increment, Address mask,
+                                                        Register tmp1, Register tmp2,
+                                                        bool preloaded, Label* where) {
+  Label done;
+  if (!preloaded) {
+    lwu(tmp1, counter_addr);
+  }
+  addi(tmp1, tmp1, increment);
+  sw(tmp1, counter_addr);
+  lwu(tmp2, mask);
+  andr(tmp1, tmp1, tmp2);
+  bnez(tmp1, done);
+  j(*where);
+  bind(done);
+}
+
+void InterpreterMacroAssembler::increment_mask_and_jump(Address counter_addr,
+                                                        int increment, int mask,
+                                                        Register tmp1, Register tmp2,
+                                                        bool preloaded, Label* where) {
+  Label done;
+  if (!preloaded) {
+    lwu(tmp1, counter_addr);
+  }
+  addi(tmp1, tmp1, increment);
+  sw(tmp1, counter_addr);
+  movptr(tmp2, mask);
+  andr(tmp1, tmp1, tmp2);
+  bnez(tmp1, done);
+  j(*where);
+  bind(done);
+}
+
+void InterpreterMacroAssembler::notify_method_entry() {
+  if (JvmtiExport::can_post_interpreter_events()) {
+    Label L;
+    lwu(x13, Address(xthread, JavaThread::interp_only_mode_offset()));
+    beqz(x13, L);
+    call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::post_method_entry));
+    bind(L);
+  }
+  if (DTraceMethodProbes) {
+    get_method(c_rarg1);
+    call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry), xthread, c_rarg1);
+  }
+}
+
+void InterpreterMacroAssembler::notify_method_exit(TosState state, NotifyMethodExitMode mode) {
+  if (JvmtiExport::can_post_interpreter_events()) {
+    Label L;
+    lwu(x13, Address(xthread, JavaThread::interp_only_mode_offset()));
+    beqz(x13, L);
+    if (mode == NotifyJVMTI) {
+      push(state);
+      call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::post_method_exit));
+      pop(state);
+    }
+    bind(L);
+  }
+  if (DTraceMethodProbes) {
+    push(state);
+    get_method(c_rarg1);
+    call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit), xthread, c_rarg1);
+    pop(state);
+  }
+}
+
+void InterpreterMacroAssembler::narrow(Register result) {
+  // Get method->_constMethod->_result_type
+  ld(t0, Address(fp, frame::interpreter_frame_method_offset * wordSize));
+  ld(t0, Address(t0, Method::const_offset()));
+  lbu(t0, Address(t0, ConstMethod::result_type_offset()));
+
+  Label done, notBool, notByte, notChar;
+
+  // common case first: T_INT
+  subi(t1, t0, T_INT);
+  beqz(t1, done);
+
+  // T_BOOLEAN
+  subi(t1, t0, T_BOOLEAN);
+  bnez(t1, notBool);
+  andi(result, result, 0x1);
+  j(done);
+
+  bind(notBool);
+  // T_BYTE
+  subi(t1, t0, T_BYTE);
+  bnez(t1, notByte);
+  slli(result, result, 56);
+  srai(result, result, 56);
+  j(done);
+
+  bind(notByte);
+  // T_CHAR
+  subi(t1, t0, T_CHAR);
+  bnez(t1, notChar);
+  slli(result, result, 48);
+  srli(result, result, 48);
+  j(done);
+
+  bind(notChar);
+  // T_SHORT: sign-extend short
+  slli(result, result, 48);
+  srai(result, result, 48);
+
+  bind(done);
+}
+
+void InterpreterMacroAssembler::verify_frame_setup() {
+#ifdef ASSERT
+  Label L;
+  const Address monitor_block_top(fp, frame::interpreter_frame_monitor_block_top_offset * wordSize);
+  ld(t0, monitor_block_top);
+  beq(esp, t0, L);
+  stop("broken stack frame setup in interpreter");
+  bind(L);
+#endif
+}
+
+void InterpreterMacroAssembler::verify_field_offset(Register reg) {
+#ifdef ASSERT
+  Label L;
+  mv(t0, (int64_t)instanceOopDesc::base_offset_in_bytes());
+  bge(reg, t0, L);
+  stop("bad field offset");
+  bind(L);
+#endif
 }
 
 #endif // !CC_INTERP

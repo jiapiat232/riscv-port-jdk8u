@@ -141,12 +141,20 @@ class InterpreterMacroAssembler: public MacroAssembler {
   void store_ptr(int n, Register val);
 
   void prepare_to_jump_from_interpreted();
-  void jump_from_interpreted(Register method, Register temp);
+  void jump_from_interpreted(Register method, Register temp = t0);
+
+  void verify_field_offset(Register reg);
+  void get_vm_result_2(Register metadata_result, Register java_thread) {
+    ((MacroAssembler*)this)->get_vm_result_2(metadata_result, java_thread);
+  }
+
+  void narrow(Register result);
 
   void verify_FPU(int stack_depth, TosState state = ftos) {}
   void verify_method_data_pointer() {}
   void dispatch_prolog(TosState state, int step = 0) {}
   void dispatch_epilog(TosState state, int step = 0);
+  void get_dispatch();
   void dispatch_only(TosState state);
   void dispatch_only_normal(TosState state);
   void dispatch_only_noverify(TosState state);
@@ -165,6 +173,41 @@ class InterpreterMacroAssembler: public MacroAssembler {
 
   // Profile and counters
   void update_mdp_for_ret(Register return_bci);
+  void set_method_data_pointer_for_bcp();
+  void test_method_data_pointer(Register mdp, Label& zero_continue);
+  void increment_mask_and_jump(Address counter_addr,
+                               int increment, Address mask,
+                               Register tmp1, Register tmp2,
+                               bool preloaded, Label* where);
+  void increment_mask_and_jump(Address counter_addr,
+                               int increment, int mask,
+                               Register tmp1, Register tmp2,
+                               bool preloaded, Label* where);
+
+  void gen_subtype_check(Register sub_klass, Label& ok_is_subtype) {
+    check_klass_subtype(sub_klass, x10, x12, ok_is_subtype);
+  }
+
+  void profile_taken_branch(Register mdp) {}
+  void profile_not_taken_branch(Register mdp) {}
+  void profile_call(Register mdp) {}
+  void profile_final_call(Register mdp) {}
+  void profile_virtual_call(Register receiver, Register mdp, Register scratch2 = noreg, bool receiver_can_be_null = false) {}
+  void profile_ret(Register return_bci, Register mdp) {}
+  void profile_null_seen(Register mdp) {}
+  void profile_typecheck(Register mdp, Register klass, Register scratch = noreg) {}
+  void profile_typecheck_failed(Register mdp) {}
+  void profile_switch_default(Register mdp) {}
+  void profile_switch_case(Register index_in_scratch, Register mdp, Register scratch2) {}
+  void profile_obj_type(Register obj, const Address& mdo_addr) {}
+  void profile_arguments_type(Register mdp, Register callee, Register tmp, bool is_virtual) {}
+  void profile_return_type(Register mdp, Register ret, Register tmp) {}
+  void profile_parameters_type(Register mdp, Register tmp1, Register tmp2) {}
+
+  typedef enum { NotifyJVMTI, SkipNotifyJVMTI } NotifyMethodExitMode;
+  void notify_method_entry();
+  void notify_method_exit(TosState state, NotifyMethodExitMode mode);
+  void verify_frame_setup();
 #endif // !CC_INTERP
 };
 

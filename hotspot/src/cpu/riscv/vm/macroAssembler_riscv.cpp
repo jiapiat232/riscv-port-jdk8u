@@ -29,6 +29,8 @@
 #include "memory/barrierSet.hpp"
 #include "memory/cardTableModRefBS.hpp"
 #include "memory/universe.hpp"
+#include "oops/klass.inline.hpp"
+#include "oops/instanceKlass.hpp"
 #include "runtime/os.hpp"
 #include "runtime/thread.hpp"
 
@@ -312,6 +314,45 @@ void MacroAssembler::jmp(address entry) {
   jalr(zr, t0, 0);
 }
 
+void MacroAssembler::far_jump(const Address& entry, Register tmp) {
+  if (entry.target() != NULL) {
+    movptr(tmp, (intptr_t)entry.target());
+    jalr(zr, tmp, 0);
+  } else {
+    movptr(tmp, entry.offset());
+    add(tmp, entry.base(), tmp);
+    jalr(zr, tmp, 0);
+  }
+}
+
+void MacroAssembler::far_call(const Address& entry, Register tmp) {
+  if (entry.target() != NULL) {
+    movptr(tmp, (intptr_t)entry.target());
+    jalr(ra, tmp, 0);
+  } else {
+    movptr(tmp, entry.offset());
+    add(tmp, entry.base(), tmp);
+    jalr(ra, tmp, 0);
+  }
+}
+
+void MacroAssembler::la(Register Rd, const Address& adr) {
+  if (adr.getMode() == Address::literal) {
+    movptr(Rd, (intptr_t)adr.target());
+  } else {
+    if (adr.is_simm12()) {
+      addi(Rd, adr.base(), adr.offset());
+    } else {
+      movptr(Rd, adr.offset());
+      add(Rd, adr.base(), Rd);
+    }
+  }
+}
+
+void MacroAssembler::la(Register Rd, const address addr) {
+  movptr(Rd, (intptr_t)addr);
+}
+
 // -------------------------------------------------------------
 // Branch and Jump with Labels
 // -------------------------------------------------------------
@@ -441,11 +482,322 @@ void MacroAssembler::load_byte_map_base(Register dst) {
   movptr(dst, (intptr_t)ct->byte_map_base);
 }
 
+void MacroAssembler::test_bit(Register Rd, Register Rs, uint32_t bit_pos) {
+  assert(bit_pos < 64, "invalid bit range");
+  int64_t imm = (int64_t)(1UL << bit_pos);
+  if (is_simm12(imm)) {
+    andi(Rd, Rs, imm);
+  } else {
+    srli(Rd, Rs, bit_pos);
+    andi(Rd, Rd, 1);
+  }
+}
+
 void MacroAssembler::safepoint_poll(Register tmp) {
   address poll_address = os::get_polling_page();
   movptr(tmp, (intptr_t)poll_address);
   ld(zr, Address(tmp, 0));
 }
+
+void MacroAssembler::shift_left_add(Register Rd, Register Rs1, Register Rs2, int shamt) {
+  shift_left_add(Rd, Rs1, Rs2, shamt, Rd);
+}
+
+void MacroAssembler::shift_left_add(Register Rd, Register Rs1, Register Rs2, int shamt, Register tmp) {
+  assert_different_registers(Rs2, tmp);
+  if (shamt != 0) {
+    slli(tmp, Rs1, shamt);
+    add(Rd, Rs2, tmp);
+  } else {
+    add(Rd, Rs1, Rs2);
+  }
+}
+
+void MacroAssembler::membar(uint32_t order_constraint) {
+  uint32_t predecessor = (order_constraint >> 2) & 0x3;
+  uint32_t successor = order_constraint & 0x3;
+  fence(predecessor, successor);
+}
+
+void MacroAssembler::zext(Register dst, Register src, int bits) {
+  if (bits == 64) {
+    if (dst != src) mv(dst, src);
+    return;
+  }
+  slli(dst, src, 64 - bits);
+  srli(dst, dst, 64 - bits);
+}
+
+void MacroAssembler::sext(Register dst, Register src, int bits) {
+  if (bits == 64) {
+    if (dst != src) mv(dst, src);
+    return;
+  }
+  if (bits == 32) {
+    addiw(dst, src, 0);
+    return;
+  }
+  slli(dst, src, 64 - bits);
+  srai(dst, dst, 64 - bits);
+}
+
+void MacroAssembler::cast_primitive_type(BasicType type, Register Rt) {
+  switch (type) {
+    case T_BOOLEAN:
+      c2bool(Rt);
+      break;
+    case T_CHAR:
+      zext(Rt, Rt, 16);
+      break;
+    case T_BYTE:
+      sext(Rt, Rt, 8);
+      break;
+    case T_SHORT:
+      sext(Rt, Rt, 16);
+      break;
+    case T_INT:
+      sext(Rt, Rt, 32);
+      break;
+    case T_LONG:
+    case T_VOID:
+    case T_FLOAT:
+    case T_DOUBLE:
+      break;
+    default:
+      ShouldNotReachHere();
+  }
+}
+
+void MacroAssembler::encode_heap_oop(Register d, Register s) {
+  if (Universe::narrow_oop_base() == NULL) {
+    if (Universe::narrow_oop_shift() != 0) {
+      assert(LogMinObjAlignmentInBytes == Universe::narrow_oop_shift(), "decode alg wrong");
+      srli(d, s, LogMinObjAlignmentInBytes);
+    } else {
+      if (d != s) mv(d, s);
+    }
+  } else {
+    Label notNull;
+    sub(d, s, xheapbase);
+    bgez(d, notNull);
+    mv(d, zr);
+    bind(notNull);
+    if (Universe::narrow_oop_shift() != 0) {
+      assert(LogMinObjAlignmentInBytes == Universe::narrow_oop_shift(), "decode alg wrong");
+      srli(d, d, LogMinObjAlignmentInBytes);
+    }
+  }
+}
+
+void MacroAssembler::decode_heap_oop(Register d, Register s) {
+  if (Universe::narrow_oop_base() == NULL) {
+    if (Universe::narrow_oop_shift() != 0) {
+      assert(LogMinObjAlignmentInBytes == Universe::narrow_oop_shift(), "decode alg wrong");
+      slli(d, s, LogMinObjAlignmentInBytes);
+    } else {
+      if (d != s) mv(d, s);
+    }
+  } else {
+    Label done;
+    if (d != s) mv(d, s);
+    beqz(d, done);
+    if (Universe::narrow_oop_shift() != 0) {
+      assert(LogMinObjAlignmentInBytes == Universe::narrow_oop_shift(), "decode alg wrong");
+      shift_left_add(d, d, xheapbase, LogMinObjAlignmentInBytes);
+    } else {
+      add(d, d, xheapbase);
+    }
+    bind(done);
+  }
+}
+
+void MacroAssembler::encode_heap_oop_not_null(Register d, Register s) {
+  if (Universe::narrow_oop_base() != NULL) {
+    sub(d, s, xheapbase);
+  } else {
+    if (d != s) mv(d, s);
+  }
+  if (Universe::narrow_oop_shift() != 0) {
+    assert(LogMinObjAlignmentInBytes == Universe::narrow_oop_shift(), "decode alg wrong");
+    srli(d, d, LogMinObjAlignmentInBytes);
+  }
+}
+
+void MacroAssembler::decode_heap_oop_not_null(Register d, Register s) {
+  if (Universe::narrow_oop_base() != NULL) {
+    if (Universe::narrow_oop_shift() != 0) {
+      assert(LogMinObjAlignmentInBytes == Universe::narrow_oop_shift(), "decode alg wrong");
+      shift_left_add(d, s, xheapbase, LogMinObjAlignmentInBytes);
+    } else {
+      add(d, s, xheapbase);
+    }
+  } else {
+    if (Universe::narrow_oop_shift() != 0) {
+      assert(LogMinObjAlignmentInBytes == Universe::narrow_oop_shift(), "decode alg wrong");
+      slli(d, s, LogMinObjAlignmentInBytes);
+    } else {
+      if (d != s) mv(d, s);
+    }
+  }
+}
+
+void MacroAssembler::load_heap_oop(Register dst, Address src) {
+  if (UseCompressedOops) {
+    lwu(dst, src);
+    decode_heap_oop(dst);
+  } else {
+    ld(dst, src);
+  }
+}
+
+void MacroAssembler::load_heap_oop_not_null(Register dst, Address src) {
+  if (UseCompressedOops) {
+    lwu(dst, src);
+    decode_heap_oop_not_null(dst);
+  } else {
+    ld(dst, src);
+  }
+}
+
+void MacroAssembler::store_heap_oop(Address dst, Register src) {
+  if (UseCompressedOops) {
+    encode_heap_oop(src);
+    sw(src, dst);
+  } else {
+    sd(src, dst);
+  }
+}
+
+void MacroAssembler::store_heap_oop_null(Address dst) {
+  if (UseCompressedOops) {
+    sw(zr, dst);
+  } else {
+    sd(zr, dst);
+  }
+}
+
+void MacroAssembler::store_check(Register obj) {
+  BarrierSet* bs = Universe::heap()->barrier_set();
+  assert(bs->kind() == BarrierSet::CardTableModRef ||
+         bs->kind() == BarrierSet::CardTableExtension, "wrong barrier set kind");
+  srli(obj, obj, CardTableModRefBS::card_shift);
+  load_byte_map_base(t1);
+  add(t1, t1, obj);
+  if (UseConcMarkSweepGC && CMSPrecleaningEnabled) {
+    membar(StoreStore);
+  }
+  sb(zr, Address(t1, 0));
+}
+
+#if INCLUDE_ALL_GCS
+void MacroAssembler::g1_write_barrier_pre(Register obj,
+                                          Register pre_val,
+                                          Register thread,
+                                          Register tmp,
+                                          bool tosca_live,
+                                          bool expand_call) {
+  Label done;
+  Label runtime;
+
+  assert_different_registers(obj, pre_val, tmp, t0);
+  assert(pre_val != noreg && tmp != noreg, "expecting registers");
+
+  Address in_progress(thread, in_bytes(JavaThread::satb_mark_queue_offset() +
+                                       PtrQueue::byte_offset_of_active()));
+  Address index(thread, in_bytes(JavaThread::satb_mark_queue_offset() +
+                                 PtrQueue::byte_offset_of_index()));
+  Address buffer(thread, in_bytes(JavaThread::satb_mark_queue_offset() +
+                                  PtrQueue::byte_offset_of_buf()));
+
+  // Is marking active?
+  if (in_bytes(PtrQueue::byte_width_of_active()) == 4) {
+    lwu(tmp, in_progress);
+  } else {
+    assert(in_bytes(PtrQueue::byte_width_of_active()) == 1, "Assumption");
+    lbu(tmp, in_progress);
+  }
+  beqz(tmp, done);
+
+  if (obj != noreg) {
+    load_heap_oop(pre_val, Address(obj, 0));
+  }
+  beqz(pre_val, done);
+
+  // Can we store into SATB queue buffer?
+  ld(tmp, index);
+  beqz(tmp, runtime);
+  subi(tmp, tmp, wordSize);
+  sd(tmp, index);
+  ld(t0, buffer);
+  add(t0, t0, tmp);
+  sd(pre_val, Address(t0, 0));
+  j(done);
+
+  bind(runtime);
+  if (tosca_live) {
+    push(x10);
+  }
+  call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::g1_wb_pre), pre_val, thread);
+  if (tosca_live) {
+    pop(x10);
+  }
+
+  bind(done);
+}
+
+void MacroAssembler::g1_write_barrier_post(Register store_addr,
+                                           Register new_val,
+                                           Register thread,
+                                           Register tmp,
+                                           Register tmp2) {
+  Label done;
+  Label runtime;
+
+  assert_different_registers(store_addr, new_val, thread, tmp, tmp2);
+
+  // Cross-region check
+  xorr(tmp, store_addr, new_val);
+  srli(tmp, tmp, HeapRegion::LogOfHRGrainBytes);
+  beqz(tmp, done);
+
+  // Filter card
+  srli(tmp, store_addr, CardTableModRefBS::card_shift);
+  load_byte_map_base(tmp2);
+  add(tmp2, tmp2, tmp);
+
+  lbu(tmp, Address(tmp2, 0));
+  addi(tmp, tmp, - (int)G1SATBCardTableModRefBS::g1_young_card_val());
+  beqz(tmp, done);
+
+  membar(StoreLoad);
+
+  lbu(tmp, Address(tmp2, 0));
+  addi(tmp, tmp, - (int)CardTableModRefBS::dirty_card_val());
+  beqz(tmp, done);
+
+  sb(zr, Address(tmp2, 0));
+
+  // Enqueue card to dirty card queue
+  Address card_index(thread, in_bytes(JavaThread::dirty_card_queue_offset() +
+                                      PtrQueue::byte_offset_of_index()));
+  Address card_buffer(thread, in_bytes(JavaThread::dirty_card_queue_offset() +
+                                       PtrQueue::byte_offset_of_buf()));
+
+  ld(tmp, card_index);
+  beqz(tmp, runtime);
+  subi(tmp, tmp, wordSize);
+  sd(tmp, card_index);
+  ld(t0, card_buffer);
+  add(t0, t0, tmp);
+  sd(tmp2, Address(t0, 0));
+  j(done);
+
+  bind(runtime);
+  call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::g1_wb_post), tmp2, thread);
+
+  bind(done);
+}
+#endif
 
 // -------------------------------------------------------------
 // Java Frame Anchor
@@ -463,6 +815,19 @@ void MacroAssembler::set_last_Java_frame(Register last_java_sp,
   if (last_java_pc != NULL) {
     movptr(tmp, (intptr_t)last_java_pc);
     sd(tmp, Address(xthread, JavaThread::last_Java_pc_offset()));
+  }
+}
+
+void MacroAssembler::set_last_Java_frame(Register last_java_sp,
+                                         Register last_java_fp,
+                                         Label& L,
+                                         Register tmp) {
+  if (L.is_bound()) {
+    set_last_Java_frame(last_java_sp, last_java_fp, target(L), tmp);
+  } else {
+    InstructionMark im(this);
+    L.add_patch_at(code(), locator());
+    set_last_Java_frame(last_java_sp, last_java_fp, (address)NULL, tmp);
   }
 }
 
@@ -565,6 +930,27 @@ void MacroAssembler::call_VM(Register oop_result, Register last_java_sp, address
   reset_last_Java_frame(false);
 }
 
+void MacroAssembler::get_vm_result(Register oop_result, Register java_thread) {
+  ld(oop_result, Address(java_thread, JavaThread::vm_result_offset()));
+  sd(zr, Address(java_thread, JavaThread::vm_result_offset()));
+  verify_oop(oop_result, "broken oop in call_VM_base");
+}
+
+void MacroAssembler::get_vm_result_2(Register metadata_result, Register java_thread) {
+  ld(metadata_result, Address(java_thread, JavaThread::vm_result_2_offset()));
+  sd(zr, Address(java_thread, JavaThread::vm_result_2_offset()));
+}
+
+void MacroAssembler::load_sized_value(Register dst, Address src, size_t size_in_bytes, bool is_signed) {
+  switch (size_in_bytes) {
+    case 1:  is_signed ? lb(dst, src) : lbu(dst, src); break;
+    case 2:  is_signed ? lh(dst, src) : lhu(dst, src); break;
+    case 4:  is_signed ? lw(dst, src) : lwu(dst, src); break;
+    case 8:  ld(dst, src); break;
+    default: ShouldNotReachHere();
+  }
+}
+
 // -------------------------------------------------------------
 // Null Checks
 // -------------------------------------------------------------
@@ -584,3 +970,438 @@ void MacroAssembler::null_check(Register reg, int offset) {
 bool MacroAssembler::uses_implicit_null_check(void* address) {
   return (uintptr_t)address < (uintptr_t)os::vm_page_size();
 }
+
+// -------------------------------------------------------------
+// Klass Encoding/Decoding and Loading/Storing
+// -------------------------------------------------------------
+void MacroAssembler::encode_klass_not_null(Register r, Register tmp) {
+  encode_klass_not_null(r, r, tmp);
+}
+
+void MacroAssembler::encode_klass_not_null(Register dst, Register src, Register tmp) {
+  if (Universe::narrow_klass_base() == NULL) {
+    if (Universe::narrow_klass_shift() != 0) {
+      assert(LogKlassAlignmentInBytes == Universe::narrow_klass_shift(), "decode alg wrong");
+      srli(dst, src, LogKlassAlignmentInBytes);
+    } else {
+      if (dst != src) mv(dst, src);
+    }
+    return;
+  }
+
+  Register rbase = dst;
+  if (dst == src) rbase = tmp;
+  movptr(rbase, (intptr_t)Universe::narrow_klass_base());
+  sub(dst, src, rbase);
+  if (Universe::narrow_klass_shift() != 0) {
+    assert(LogKlassAlignmentInBytes == Universe::narrow_klass_shift(), "decode alg wrong");
+    srli(dst, dst, LogKlassAlignmentInBytes);
+  }
+}
+
+void MacroAssembler::decode_klass_not_null(Register r, Register tmp) {
+  decode_klass_not_null(r, r, tmp);
+}
+
+void MacroAssembler::decode_klass_not_null(Register dst, Register src, Register tmp) {
+  if (Universe::narrow_klass_base() != NULL) {
+    Register rbase = dst;
+    if (dst == src) rbase = tmp;
+    movptr(rbase, (intptr_t)Universe::narrow_klass_base());
+    if (Universe::narrow_klass_shift() != 0) {
+      assert(LogKlassAlignmentInBytes == Universe::narrow_klass_shift(), "decode alg wrong");
+      shift_left_add(dst, src, rbase, LogKlassAlignmentInBytes);
+    } else {
+      add(dst, src, rbase);
+    }
+  } else {
+    if (Universe::narrow_klass_shift() != 0) {
+      assert(LogKlassAlignmentInBytes == Universe::narrow_klass_shift(), "decode alg wrong");
+      slli(dst, src, LogKlassAlignmentInBytes);
+    } else {
+      if (dst != src) mv(dst, src);
+    }
+  }
+}
+
+void MacroAssembler::load_klass(Register dst, Register src) {
+  if (UseCompressedClassPointers) {
+    lwu(dst, Address(src, oopDesc::klass_offset_in_bytes()));
+    decode_klass_not_null(dst);
+  } else {
+    ld(dst, Address(src, oopDesc::klass_offset_in_bytes()));
+  }
+}
+
+void MacroAssembler::store_klass(Register dst, Register src) {
+  if (UseCompressedClassPointers) {
+    encode_klass_not_null(src);
+    sw(src, Address(dst, oopDesc::klass_offset_in_bytes()));
+  } else {
+    sd(src, Address(dst, oopDesc::klass_offset_in_bytes()));
+  }
+}
+
+void MacroAssembler::store_klass_gap(Register dst, Register src) {
+  if (UseCompressedClassPointers) {
+    sw(src, Address(dst, oopDesc::klass_gap_offset_in_bytes()));
+  }
+}
+
+// -------------------------------------------------------------
+// Subtype Checking
+// -------------------------------------------------------------
+void MacroAssembler::check_klass_subtype(Register sub_klass,
+                                         Register super_klass,
+                                         Register temp_reg,
+                                         Label& L_success) {
+  Label L_failure;
+  check_klass_subtype_fast_path(sub_klass, super_klass, temp_reg, &L_success, &L_failure, NULL);
+  check_klass_subtype_slow_path_linear(sub_klass, super_klass, temp_reg, noreg, &L_success, NULL);
+  bind(L_failure);
+}
+
+void MacroAssembler::check_klass_subtype_fast_path(Register sub_klass,
+                                                   Register super_klass,
+                                                   Register temp_reg,
+                                                   Label* L_success,
+                                                   Label* L_failure,
+                                                   Label* L_slow_path) {
+  assert_different_registers(sub_klass, super_klass, temp_reg);
+  Label L_fallthrough;
+  if (L_success == NULL) L_success = &L_fallthrough;
+  if (L_failure == NULL) L_failure = &L_fallthrough;
+
+  int sco_offset = in_bytes(Klass::super_check_offset_offset());
+  int sc_offset  = in_bytes(Klass::secondary_super_cache_offset());
+
+  // 1. If same klass, success
+  beq(sub_klass, super_klass, *L_success);
+
+  // 2. Load displayed supertype
+  lwu(temp_reg, Address(super_klass, sco_offset));
+  add(t0, sub_klass, temp_reg);
+  ld(t0, Address(t0, 0));
+  beq(super_klass, t0, *L_success);
+
+  // 3. If primary super, fail immediately
+  mv(t1, sc_offset);
+  if (L_slow_path == NULL) {
+    bne(temp_reg, t1, *L_failure);
+  } else {
+    beq(temp_reg, t1, *L_slow_path);
+    if (L_failure != &L_fallthrough) {
+      j(*L_failure);
+    }
+  }
+
+  bind(L_fallthrough);
+}
+
+void MacroAssembler::check_klass_subtype_slow_path_linear(Register sub_klass,
+                                                          Register super_klass,
+                                                          Register tmp1_reg,
+                                                          Register tmp2_reg,
+                                                          Label* L_success,
+                                                          Label* L_failure) {
+  Label L_fallthrough;
+  if (L_success == NULL) L_success = &L_fallthrough;
+  if (L_failure == NULL) L_failure = &L_fallthrough;
+
+  int ss_offset = in_bytes(Klass::secondary_supers_offset());
+  int sc_offset = in_bytes(Klass::secondary_super_cache_offset());
+
+  // Scan secondary supers array
+  ld(t1, Address(sub_klass, ss_offset));
+  lwu(t2, Address(t1, Array<Klass*>::length_offset_in_bytes()));
+  addi(t1, t1, Array<Klass*>::base_offset_in_bytes());
+
+  Label loop, exit;
+  beqz(t2, exit);
+  bind(loop);
+  ld(t0, Address(t1, 0));
+  beq(super_klass, t0, exit);
+  addi(t1, t1, wordSize);
+  subi(t2, t2, 1);
+  bnez(t2, loop);
+  bind(exit);
+
+  bne(super_klass, t0, *L_failure);
+
+  // Success: update secondary_super_cache
+  sd(super_klass, Address(sub_klass, sc_offset));
+  if (L_success != &L_fallthrough) {
+    j(*L_success);
+  }
+  bind(L_fallthrough);
+}
+
+// -------------------------------------------------------------
+// Method Lookup
+// -------------------------------------------------------------
+void MacroAssembler::lookup_virtual_method(Register recv_klass,
+                                           RegisterOrConstant vtable_index,
+                                           Register method_result) {
+  const int base = InstanceKlass::vtable_start_offset() * wordSize;
+  assert(vtableEntry::size() * wordSize == 8, "adjust the scaling in the code below");
+  int vtable_offset_in_bytes = base + vtableEntry::method_offset_in_bytes();
+
+  if (vtable_index.is_register()) {
+    shift_left_add(method_result, vtable_index.as_register(), recv_klass, LogBytesPerWord);
+    ld(method_result, Address(method_result, vtable_offset_in_bytes));
+  } else {
+    vtable_offset_in_bytes += vtable_index.as_constant() * wordSize;
+    if (is_simm12(vtable_offset_in_bytes)) {
+      ld(method_result, Address(recv_klass, vtable_offset_in_bytes));
+    } else {
+      movptr(method_result, vtable_offset_in_bytes);
+      add(method_result, recv_klass, method_result);
+      ld(method_result, Address(method_result, 0));
+    }
+  }
+}
+
+void MacroAssembler::lookup_interface_method(Register recv_klass,
+                                             Register intf_klass,
+                                             RegisterOrConstant itable_index,
+                                             Register method_result,
+                                             Register scan_temp,
+                                             Label& L_no_such_interface,
+                                             bool return_method) {
+  assert_different_registers(recv_klass, intf_klass, scan_temp);
+  assert_different_registers(method_result, intf_klass, scan_temp);
+
+  int vtable_base = InstanceKlass::vtable_start_offset() * wordSize;
+  int itentry_off = itableMethodEntry::method_offset_in_bytes();
+  int scan_step   = itableOffsetEntry::size() * wordSize;
+
+  lwu(scan_temp, Address(recv_klass, InstanceKlass::vtable_length_offset() * wordSize));
+  slli(scan_temp, scan_temp, 3);
+  add(scan_temp, scan_temp, recv_klass);
+  addi(scan_temp, scan_temp, vtable_base);
+  round_to(scan_temp, BytesPerLong);
+
+  if (return_method) {
+    if (itable_index.is_register()) {
+      slli(t0, itable_index.as_register(), 3);
+      add(recv_klass, recv_klass, t0);
+    } else {
+      addi(recv_klass, recv_klass, itable_index.as_constant() * wordSize);
+    }
+    if (itentry_off) {
+      addi(recv_klass, recv_klass, itentry_off);
+    }
+  }
+
+  Label search, found_method;
+  bind(search);
+  ld(method_result, Address(scan_temp, itableOffsetEntry::interface_offset_in_bytes()));
+  beq(intf_klass, method_result, found_method);
+  beqz(method_result, L_no_such_interface);
+  addi(scan_temp, scan_temp, scan_step);
+  j(search);
+
+  bind(found_method);
+  if (return_method) {
+    lwu(scan_temp, Address(scan_temp, itableOffsetEntry::offset_offset_in_bytes()));
+    add(scan_temp, recv_klass, scan_temp);
+    ld(method_result, Address(scan_temp, 0));
+  }
+}
+
+// -------------------------------------------------------------
+// Allocation Helpers
+// -------------------------------------------------------------
+void MacroAssembler::tlab_allocate(Register obj,
+                                   Register var_size_in_bytes,
+                                   int con_size_in_bytes,
+                                   Register t1,
+                                   Register t2,
+                                   Label& slow_case) {
+  assert_different_registers(obj, t2);
+  assert_different_registers(obj, var_size_in_bytes);
+  Register end = t2;
+
+  ld(obj, Address(xthread, JavaThread::tlab_top_offset()));
+  if (var_size_in_bytes == noreg) {
+    addi(end, obj, con_size_in_bytes);
+  } else {
+    add(end, obj, var_size_in_bytes);
+  }
+  ld(t0, Address(xthread, JavaThread::tlab_end_offset()));
+  bgtu(end, t0, slow_case);
+
+  // update the tlab top pointer
+  sd(end, Address(xthread, JavaThread::tlab_top_offset()));
+
+  if (var_size_in_bytes == end) {
+    sub(var_size_in_bytes, var_size_in_bytes, obj);
+  }
+}
+
+// -------------------------------------------------------------
+// Comparisons
+// -------------------------------------------------------------
+void MacroAssembler::cmp_x2i(Register dst, Register src1, Register src2,
+                             Register tmp, bool is_signed) {
+  if (src1 == src2) {
+    mv(dst, zr);
+    return;
+  }
+  Label done;
+  Register left = src1;
+  Register right = src2;
+  if (dst == src1) {
+    assert_different_registers(dst, src2, tmp);
+    mv(tmp, src1);
+    left = tmp;
+  } else if (dst == src2) {
+    assert_different_registers(dst, src1, tmp);
+    mv(tmp, src2);
+    right = tmp;
+  }
+
+  // installs 1 if gt else 0
+  if (is_signed) {
+    slt(dst, right, left);
+  } else {
+    sltu(dst, right, left);
+  }
+  bnez(dst, done);
+  if (is_signed) {
+    slt(dst, left, right);
+  } else {
+    sltu(dst, left, right);
+  }
+  // dst = -1 if lt; else if eq , dst = 0
+  neg(dst, dst);
+  bind(done);
+}
+
+void MacroAssembler::cmp_l2i(Register dst, Register src1, Register src2, Register tmp) {
+  cmp_x2i(dst, src1, src2, tmp);
+}
+
+void MacroAssembler::float_compare(Register result, FloatRegister Rs1,
+                                   FloatRegister Rs2, int unordered_result) {
+  Label Ldone;
+  if (unordered_result < 0) {
+    flt_s(result, Rs2, Rs1);
+    bgtz(result, Ldone);
+    feq_s(result, Rs1, Rs2);
+    subi(result, result, 1);
+    bind(Ldone);
+  } else {
+    flt_s(result, Rs1, Rs2);
+    bgtz(result, Ldone);
+    feq_s(result, Rs1, Rs2);
+    subi(result, result, 1);
+    bind(Ldone);
+    neg(result, result);
+  }
+}
+
+void MacroAssembler::double_compare(Register result, FloatRegister Rs1,
+                                    FloatRegister Rs2, int unordered_result) {
+  Label Ldone;
+  if (unordered_result < 0) {
+    flt_d(result, Rs2, Rs1);
+    bgtz(result, Ldone);
+    feq_d(result, Rs1, Rs2);
+    subi(result, result, 1);
+    bind(Ldone);
+  } else {
+    flt_d(result, Rs1, Rs2);
+    bgtz(result, Ldone);
+    feq_d(result, Rs1, Rs2);
+    subi(result, result, 1);
+    bind(Ldone);
+    neg(result, result);
+  }
+}
+
+// -------------------------------------------------------------
+// Extensions and Conversions
+// -------------------------------------------------------------
+void MacroAssembler::narrow_subword_type(Register reg, BasicType bt) {
+  switch (bt) {
+    case T_SHORT:
+      sext(reg, reg, 16);
+      break;
+    case T_CHAR:
+      zext(reg, reg, 16);
+      break;
+    case T_BYTE:
+      sext(reg, reg, 8);
+      break;
+    case T_BOOLEAN:
+      andi(reg, reg, 1);
+      break;
+    default:
+      ShouldNotReachHere();
+  }
+}
+
+#define FCVT_SAFE(FLOATCVT, FLOATSIG)                                                     \
+void MacroAssembler::FLOATCVT##_safe(Register dst, FloatRegister src, Register tmp) {     \
+  Label done;                                                                             \
+  assert_different_registers(dst, tmp);                                                   \
+  fclass_##FLOATSIG(tmp, src);                                                            \
+  mv(dst, zr);                                                                            \
+  andi(tmp, tmp, 0x300); /* 0x300 = quiet NaN | signalling NaN */                         \
+  bnez(tmp, done);                                                                        \
+  FLOATCVT(dst, src);                                                                     \
+  bind(done);                                                                             \
+}
+
+FCVT_SAFE(fcvt_w_s, s);
+FCVT_SAFE(fcvt_l_s, s);
+FCVT_SAFE(fcvt_w_d, d);
+FCVT_SAFE(fcvt_l_d, d);
+
+#undef FCVT_SAFE
+
+void MacroAssembler::revbw(Register Rd, Register Rs, Register tmp1, Register tmp2) {
+  assert_different_registers(Rs, tmp1, tmp2);
+  assert_different_registers(Rd, tmp1, tmp2);
+  zext(tmp1, Rs, 8);
+  slli(tmp1, tmp1, 8);
+  for (int step = 8; step < 24; step += 8) {
+    srli(tmp2, Rs, step);
+    zext(tmp2, tmp2, 8);
+    orr(tmp1, tmp1, tmp2);
+    slli(tmp1, tmp1, 8);
+  }
+  srli(Rd, Rs, 24);
+  zext(Rd, Rd, 8);
+  orr(Rd, tmp1, Rd);
+  sext(Rd, Rd, 32);
+}
+
+void MacroAssembler::revb(Register Rd, Register Rs, Register tmp1, Register tmp2) {
+  assert_different_registers(Rs, tmp1, tmp2);
+  assert_different_registers(Rd, tmp1, tmp2);
+  zext(tmp1, Rs, 8);
+  slli(tmp1, tmp1, 8);
+  for (int step = 8; step < 56; step += 8) {
+    srli(tmp2, Rs, step);
+    zext(tmp2, tmp2, 8);
+    orr(tmp1, tmp1, tmp2);
+    slli(tmp1, tmp1, 8);
+  }
+  srli(Rd, Rs, 56);
+  zext(Rd, Rd, 8);
+  orr(Rd, tmp1, Rd);
+}
+
+void MacroAssembler::subw(Register Rd, Register Rn, int64_t decrement, Register tmp) {
+  int64_t val = -decrement;
+  if (-2048 <= val && val <= 2047) {
+    addiw(Rd, Rn, val);
+  } else {
+    movptr(tmp, val);
+    addw(Rd, Rn, tmp);
+  }
+}
+
+

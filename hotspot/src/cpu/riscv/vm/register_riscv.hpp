@@ -161,6 +161,7 @@ const Register t3       = x28;
 const Register t4       = x29;
 const Register t5       = x30;
 const Register t6       = x31;
+const Register x19_sender_sp = x19;
 
 // C calling convention argument aliases
 const Register c_rarg0  = a0;

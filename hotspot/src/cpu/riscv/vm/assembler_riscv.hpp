@@ -40,22 +40,73 @@ class Argument VALUE_OBJ_CLASS_SPEC {
 };
 
 class Address VALUE_OBJ_CLASS_SPEC {
+ public:
+  enum mode {
+    no_mode,
+    base_plus_offset,
+    literal
+  };
+
  private:
-  Register _base;
-  int32_t  _offset;
+  mode             _mode;
+  Register         _base;
+  int32_t          _offset;
+  address          _target;
+  RelocationHolder _rspec;
 
  public:
-  Address() : _base(noreg), _offset(0) {}
-  Address(Register base, int32_t offset = 0) : _base(base), _offset(offset) {}
-  Address(Register base, ByteSize disp) : _base(base), _offset(in_bytes(disp)) {}
+  Address() : _mode(no_mode), _base(noreg), _offset(0), _target(NULL), _rspec() {}
+  Address(Register base, int32_t offset = 0)
+    : _mode(base_plus_offset), _base(base), _offset(offset), _target(NULL), _rspec() {}
+  Address(Register base, ByteSize disp)
+    : _mode(base_plus_offset), _base(base), _offset(in_bytes(disp)), _target(NULL), _rspec() {}
+  Address(address target, const RelocationHolder& rspec)
+    : _mode(literal), _base(noreg), _offset(0), _target(target), _rspec(rspec) {}
+  Address(address target, relocInfo::relocType rtype = relocInfo::external_word_type);
 
-  Register base()   const { return _base; }
-  int32_t  offset() const { return _offset; }
+  mode     getMode() const { return _mode; }
+  Register base()    const { return _base; }
+  int32_t  offset()  const { return _offset; }
+  address  target()  const { return _target; }
+  const RelocationHolder& rspec() const { return _rspec; }
 
   bool is_simm12() const {
     return -2048 <= _offset && _offset <= 2047;
   }
 };
+
+// Convenience classes
+class RuntimeAddress: public Address {
+ public:
+  RuntimeAddress(address target) : Address(target, relocInfo::runtime_call_type) {}
+  ~RuntimeAddress() {}
+};
+
+class OopAddress: public Address {
+ public:
+  OopAddress(address target) : Address(target, relocInfo::oop_type) {}
+  ~OopAddress() {}
+};
+
+class ExternalAddress: public Address {
+ private:
+  static relocInfo::relocType reloc_for_target(address target) {
+    return external_word_Relocation::can_be_relocated(target) ? relocInfo::external_word_type : relocInfo::none;
+  }
+
+ public:
+  ExternalAddress(address target) : Address(target, reloc_for_target(target)) {}
+  ~ExternalAddress() {}
+};
+
+class InternalAddress: public Address {
+ public:
+  InternalAddress(address target) : Address(target, relocInfo::internal_word_type) {}
+  ~InternalAddress() {}
+};
+
+extern const Register g_INTArgReg[Argument::n_int_register_parameters_c];
+extern const FloatRegister g_FPArgReg[Argument::n_float_register_parameters_c];
 
 class Assembler : public AbstractAssembler {
  public:
@@ -187,6 +238,24 @@ class Assembler : public AbstractAssembler {
            ((rs1->encoding() & 0x1f) << 15) |
            ((funct3 & 0x7) << 12) |
            ((imm & 0x1f) << 7) |
+           (opcode & 0x7f);
+  }
+
+  static inline int32_t encode_r_fp_to_gpr(int funct7, FloatRegister rs2, FloatRegister rs1, int funct3, Register rd, int opcode) {
+    return ((funct7 & 0x7f) << 25) |
+           (((rs2 == fnoreg ? 0 : rs2->encoding()) & 0x1f) << 20) |
+           (((rs1 == fnoreg ? 0 : rs1->encoding()) & 0x1f) << 15) |
+           ((funct3 & 0x7) << 12) |
+           (((rd == noreg ? 0 : rd->encoding()) & 0x1f) << 7) |
+           (opcode & 0x7f);
+  }
+
+  static inline int32_t encode_r_gpr_to_fp(int funct7, Register rs2, Register rs1, int funct3, FloatRegister rd, int opcode) {
+    return ((funct7 & 0x7f) << 25) |
+           (((rs2 == noreg ? 0 : rs2->encoding()) & 0x1f) << 20) |
+           (((rs1 == noreg ? 0 : rs1->encoding()) & 0x1f) << 15) |
+           ((funct3 & 0x7) << 12) |
+           (((rd == fnoreg ? 0 : rd->encoding()) & 0x1f) << 7) |
            (opcode & 0x7f);
   }
 
@@ -365,6 +434,46 @@ class Assembler : public AbstractAssembler {
   void fmul_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0001001, rs2, rs1, 0b111, rd, OP_FP)); }
   void fdiv_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0001101, rs2, rs1, 0b111, rd, OP_FP)); }
 
+  void fsqrt_s(FloatRegister rd, FloatRegister rs1) { emit_int32(encode_r_fp(0b0101100, (FloatRegister)0, rs1, 0b111, rd, OP_FP)); }
+  void fsqrt_d(FloatRegister rd, FloatRegister rs1) { emit_int32(encode_r_fp(0b0101101, (FloatRegister)0, rs1, 0b111, rd, OP_FP)); }
+
+  void fsgnj_s(FloatRegister rd, FloatRegister rs1, FloatRegister rs2)  { emit_int32(encode_r_fp(0b0010000, rs2, rs1, 0b000, rd, OP_FP)); }
+  void fsgnjn_s(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0010000, rs2, rs1, 0b001, rd, OP_FP)); }
+  void fsgnjx_s(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0010000, rs2, rs1, 0b010, rd, OP_FP)); }
+
+  void fsgnj_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2)  { emit_int32(encode_r_fp(0b0010001, rs2, rs1, 0b000, rd, OP_FP)); }
+  void fsgnjn_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0010001, rs2, rs1, 0b001, rd, OP_FP)); }
+  void fsgnjx_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0010001, rs2, rs1, 0b010, rd, OP_FP)); }
+
+  // Floating-point moves between GPR and FPR
+  void fmv_w_x(FloatRegister rd, Register rs1) { emit_int32(encode_r_gpr_to_fp(0b1111000, noreg, rs1, 0b000, rd, OP_FP)); }
+  void fmv_x_w(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1110000, fnoreg, rs1, 0b000, rd, OP_FP)); }
+  void fmv_d_x(FloatRegister rd, Register rs1) { emit_int32(encode_r_gpr_to_fp(0b1111001, noreg, rs1, 0b000, rd, OP_FP)); }
+  void fmv_x_d(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1110001, fnoreg, rs1, 0b000, rd, OP_FP)); }
+
+  // Floating-point conversions
+  void fcvt_s_w(FloatRegister rd, Register rs1) { emit_int32(encode_r_gpr_to_fp(0b1101000, noreg, rs1, 0b111, rd, OP_FP)); }
+  void fcvt_s_l(FloatRegister rd, Register rs1) { emit_int32(encode_r_gpr_to_fp(0b1101000, as_Register(2), rs1, 0b111, rd, OP_FP)); }
+  void fcvt_w_s(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1100000, fnoreg, rs1, 0b001, rd, OP_FP)); }
+  void fcvt_l_s(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1100000, as_FloatRegister(2), rs1, 0b001, rd, OP_FP)); }
+  void fcvt_d_w(FloatRegister rd, Register rs1) { emit_int32(encode_r_gpr_to_fp(0b1101001, noreg, rs1, 0b111, rd, OP_FP)); }
+  void fcvt_d_l(FloatRegister rd, Register rs1) { emit_int32(encode_r_gpr_to_fp(0b1101001, as_Register(2), rs1, 0b111, rd, OP_FP)); }
+  void fcvt_w_d(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1100001, fnoreg, rs1, 0b001, rd, OP_FP)); }
+  void fcvt_l_d(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1100001, as_FloatRegister(2), rs1, 0b001, rd, OP_FP)); }
+  void fcvt_d_s(FloatRegister rd, FloatRegister rs1) { emit_int32(encode_r_fp(0b0100001, fnoreg, rs1, 0b111, rd, OP_FP)); }
+  void fcvt_s_d(FloatRegister rd, FloatRegister rs1) { emit_int32(encode_r_fp(0b0100000, fnoreg, rs1, 0b111, rd, OP_FP)); }
+
+  // Floating-point comparisons
+  void feq_s(Register rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp_to_gpr(0b1010000, rs2, rs1, 0b010, rd, OP_FP)); }
+  void flt_s(Register rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp_to_gpr(0b1010000, rs2, rs1, 0b001, rd, OP_FP)); }
+  void fle_s(Register rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp_to_gpr(0b1010000, rs2, rs1, 0b000, rd, OP_FP)); }
+  void feq_d(Register rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp_to_gpr(0b1010001, rs2, rs1, 0b010, rd, OP_FP)); }
+  void flt_d(Register rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp_to_gpr(0b1010001, rs2, rs1, 0b001, rd, OP_FP)); }
+  void fle_d(Register rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp_to_gpr(0b1010001, rs2, rs1, 0b000, rd, OP_FP)); }
+
+  void fclass_s(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1110000, fnoreg, rs1, 0b001, rd, OP_FP)); }
+  void fclass_d(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1110001, fnoreg, rs1, 0b001, rd, OP_FP)); }
+
   // -------------------------------------------------------------
   // Standard Pseudo Instructions
   // -------------------------------------------------------------
@@ -373,10 +482,19 @@ class Assembler : public AbstractAssembler {
   void notr(Register rd, Register rs)  { xori(rd, rs, -1); }
   void neg(Register rd, Register rs)   { sub(rd, zr, rs); }
   void negw(Register rd, Register rs)  { subw(rd, zr, rs); }
+  void subi(Register rd, Register rs, int32_t imm) { addi(rd, rs, -imm); }
   void j(int32_t offset)               { jal(zr, offset); }
   void jr(Register rs)                 { jalr(zr, rs, 0); }
   void jalr(Register rs)               { jalr(ra, rs, 0); }
   void ret()                           { jalr(zr, ra, 0); }
+
+  void fmv_s(FloatRegister rd, FloatRegister rs) { if (rd != rs) fsgnj_s(rd, rs, rs); }
+  void fabs_s(FloatRegister rd, FloatRegister rs) { fsgnjx_s(rd, rs, rs); }
+  void fneg_s(FloatRegister rd, FloatRegister rs) { fsgnjn_s(rd, rs, rs); }
+
+  void fmv_d(FloatRegister rd, FloatRegister rs) { if (rd != rs) fsgnj_d(rd, rs, rs); }
+  void fabs_d(FloatRegister rd, FloatRegister rs) { fsgnjx_d(rd, rs, rs); }
+  void fneg_d(FloatRegister rd, FloatRegister rs) { fsgnjn_d(rd, rs, rs); }
 
   virtual RegisterOrConstant delayed_value_impl(intptr_t* delayed_value_addr,
                                                 Register tmp,
