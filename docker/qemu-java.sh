@@ -12,7 +12,16 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export PATH="$HOME/.docker/bin:$PATH"
 IMAGE_NAME="jdk8u-riscv-builder:latest"
 
-JAVA_PATH_IN_CONTAINER="/workspace/build/linux-riscv64-normal-server-slowdebug/jdk/bin/java"
+if [ -f "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/images/j2sdk-image/bin/java" ]; then
+  JAVA_PATH_IN_CONTAINER="/workspace/build/linux-riscv64-normal-server-slowdebug/images/j2sdk-image/bin/java"
+else
+  JAVA_PATH_IN_CONTAINER="/workspace/build/linux-riscv64-normal-server-slowdebug/jdk/bin/java"
+fi
+
+QEMU_BIN="qemu-riscv64-static"
+if [ -x "${REPO_ROOT}/docker/bin/qemu-riscv64-static" ]; then
+  QEMU_BIN="/workspace/docker/bin/qemu-riscv64-static"
+fi
 
 echo "==> Running QEMU RISC-V Java..."
 docker run --rm \
@@ -23,5 +32,6 @@ docker run --rm \
       echo 'Error: ${JAVA_PATH_IN_CONTAINER} not found. Please build JDK first!'
       exit 1
     fi
-    qemu-riscv64-static -cpu rv64,c=true,v=true -E LD_LIBRARY_PATH=/usr/riscv64-linux-gnu/lib \"${JAVA_PATH_IN_CONTAINER}\" \"\$@\"
+    trap 'cp /tmp/hs_err*.log /workspace/ 2>/dev/null || true' EXIT
+    \"${QEMU_BIN}\" -cpu rv64 -E LD_LIBRARY_PATH=/usr/riscv64-linux-gnu/lib \"${JAVA_PATH_IN_CONTAINER}\" \"\$@\"
   " -- "$@"

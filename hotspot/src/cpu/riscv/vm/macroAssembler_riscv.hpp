@@ -29,6 +29,8 @@
 #include "asm/assembler.hpp"
 #include "asm/assembler.inline.hpp"
 
+class Method;
+
 class MacroAssembler: public Assembler {
  public:
   enum {
@@ -52,10 +54,13 @@ class MacroAssembler: public Assembler {
     Assembler::mv(dst, src);
   }
 
+  void movptr_with_offset(Register Rd, address addr, int32_t &offset);
   void movptr(Register dst, intptr_t val);
   void li(Register rd, intptr_t imm) { movptr(rd, imm); }
   void mv(Register rd, int64_t imm) { li(rd, imm); }
   void mv(Register rd, address addr) { movptr(rd, (intptr_t)addr); }
+  void mov_metadata(Register dst, Metadata* obj);
+  void movoop(Register dst, jobject obj);
 
   // -------------------------------------------------------------
   // Memory Operations with Address
@@ -94,6 +99,8 @@ class MacroAssembler: public Assembler {
   void pop(Register r);
   void push(FloatRegister r);
   void pop(FloatRegister r);
+  void push_reg(Register r);
+  void pop_reg(Register r);
   void enter();
   void leave();
 
@@ -108,6 +115,7 @@ class MacroAssembler: public Assembler {
 
   void la(Register Rd, const Address& adr);
   void la(Register Rd, const address addr);
+  void la(Register Rd, Label& L);
 
   // -------------------------------------------------------------
   // Branch and Jump with Labels
@@ -271,9 +279,24 @@ class MacroAssembler: public Assembler {
   void set_last_Java_frame(Register last_java_sp, Register last_java_fp, Label& L, Register tmp);
   void reset_last_Java_frame(bool clear_fp = true);
 
-  // -------------------------------------------------------------
-  // Runtime Calls (call_VM family)
-  // -------------------------------------------------------------
+  virtual void call_VM_leaf_base(address entry_point,
+                                 int     number_of_arguments = 0,
+                                 Label  *retaddr = NULL);
+  void call_VM_leaf_base(address entry_point,
+                         int     number_of_arguments,
+                         Label  &retaddr) {
+    call_VM_leaf_base(entry_point, number_of_arguments, &retaddr);
+  }
+
+  virtual void call_VM_base(Register oop_result,
+                            Register java_thread,
+                            Register last_java_sp,
+                            address  entry_point,
+                            int      number_of_arguments = 0,
+                            bool     check_exceptions = true);
+  virtual void check_and_handle_earlyret(Register java_thread) {}
+  virtual void check_and_handle_popframe(Register java_thread) {}
+
   void call_VM(Register oop_result, address entry_point, bool check_exceptions = true);
   void call_VM(Register oop_result, address entry_point, Register arg_1, bool check_exceptions = true);
   void call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, bool check_exceptions = true);
@@ -324,9 +347,8 @@ class MacroAssembler: public Assembler {
   static bool needs_explicit_null_check(intptr_t offset);
   static bool uses_implicit_null_check(void* address);
 
-  void stop(const char* msg) {
-    ebreak();
-  }
+  static void debug64(char* msg, address bcp, Method* m = NULL, intptr_t dispatched_bc = -1);
+  void stop(const char* msg);
   void warn(const char* msg) {}
   void untested() { stop("untested"); }
   void unimplemented(const char* what = "") { stop(what); }

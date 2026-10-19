@@ -13,6 +13,11 @@ IMAGE_NAME="jdk8u-riscv-builder:latest"
 
 JAVA_PATH_IN_CONTAINER="/workspace/build/linux-riscv64-normal-server-slowdebug/jdk/bin/java"
 
+QEMU_BIN="qemu-riscv64-static"
+if [ -x "${REPO_ROOT}/docker/bin/qemu-riscv64-static" ]; then
+  QEMU_BIN="/workspace/docker/bin/qemu-riscv64-static"
+fi
+
 echo "==> Starting QEMU with GDB stub on port 1234..."
 docker run --rm -it \
   -v "${REPO_ROOT}:/workspace" \
@@ -24,7 +29,7 @@ docker run --rm -it \
       exit 1
     fi
     # Start QEMU in background with gdb server
-    qemu-riscv64-static -g 1234 -cpu rv64,c=true,v=true \"${JAVA_PATH_IN_CONTAINER}\" \"\$@\" &
+    \"${QEMU_BIN}\" -g 1234 -cpu rv64,c=true,v=true \"${JAVA_PATH_IN_CONTAINER}\" \"\$@\" &
     QEMU_PID=\$!
     echo 'QEMU started (PID: '\$QEMU_PID'). Attaching gdb-multiarch...'
     

@@ -49,3 +49,27 @@ void VMRegImpl::set_regName() {
     regName[i] = "NON-GPR-FPR";
   }
 }
+
+Register VMRegImpl::as_Register() {
+  assert(is_Register(), "must be");
+  return ::as_Register(value() >> 1);
+}
+
+FloatRegister VMRegImpl::as_FloatRegister() {
+  assert(is_FloatRegister() && is_even(value()), "must be");
+  return ::as_FloatRegister((value() - ConcreteRegisterImpl::max_gpr) >> 1);
+}
+
+bool VMRegImpl::is_Register() {
+  return (unsigned int) value() < (unsigned int) ConcreteRegisterImpl::max_gpr;
+}
+
+bool VMRegImpl::is_FloatRegister() {
+  return value() >= ConcreteRegisterImpl::max_gpr && value() < ConcreteRegisterImpl::max_fpr;
+}
+
+bool VMRegImpl::is_concrete() {
+  assert(is_reg(), "must be");
+  return is_even(value());
+}
+

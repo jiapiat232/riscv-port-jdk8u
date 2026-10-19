@@ -186,6 +186,10 @@ class StubGenerator: public StubCodeGenerator {
 
     // Pass parameters if any
     __ mv(esp, sp);
+    __ slli(t0, c_rarg6, LogBytesPerWord);
+    __ sub(t0, sp, t0); // Move SP out of the way
+    __ andi(sp, t0, -16);
+
     Label parameters_done;
     __ beqz(c_rarg6, parameters_done);
 
@@ -193,19 +197,16 @@ class StubGenerator: public StubCodeGenerator {
     __ bind(loop);
     __ ld(t0, Address(c_rarg5, 0));
     __ addi(c_rarg5, c_rarg5, wordSize);
-    __ push(t0);
-    __ addi(c_rarg6, c_rarg6, -1);
+    __ subi(c_rarg6, c_rarg6, 1);
+    __ push_reg(t0);
     __ bgtz(c_rarg6, loop);
-
-    // Keep 16-byte alignment
-    __ andi(sp, sp, -16);
 
     __ bind(parameters_done);
 
     // Call Java entry point:
-    //   t0: sender sp
     //   xmethod: Method*
-    __ mv(t0, sp);
+    //   x19_sender_sp: sender sp
+    __ mv(x19_sender_sp, sp);
     __ jalr(ra, c_rarg4, 0);
 
     // Exception handling code uses return_address to identify entry frames
@@ -439,9 +440,10 @@ class StubGenerator: public StubCodeGenerator {
 
     Label exit, error;
 
-    // Save registers
-    __ push(a1);
-    __ push(a2);
+    // Save registers on C stack (sp) with 16-byte alignment
+    __ addi(sp, sp, -16);
+    __ sd(a1, Address(sp, 8));
+    __ sd(a2, Address(sp, 0));
 
     // Object is in a0. If obj == NULL, it is OK.
     __ beqz(a0, exit);
@@ -457,8 +459,9 @@ class StubGenerator: public StubCodeGenerator {
     __ beqz(a1, error);
 
     __ bind(exit);
-    __ pop(a2);
-    __ pop(a1);
+    __ ld(a2, Address(sp, 0));
+    __ ld(a1, Address(sp, 8));
+    __ addi(sp, sp, 16);
     __ ret();
 
     __ bind(error);

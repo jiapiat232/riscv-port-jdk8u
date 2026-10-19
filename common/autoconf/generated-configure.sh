@@ -14907,7 +14907,7 @@ $as_echo "$with_jvm_variants" >&6; }
   if test "x$JVM_VARIANT_ZEROSHARK" = xtrue ; then
     INCLUDE_SA=false
   fi
-  if test "x$VAR_CPU" = xppc64 -o "x$VAR_CPU" = xppc64le ; then
+  if test "x$VAR_CPU" = xppc64 -o "x$VAR_CPU" = xppc64le -o "x$VAR_CPU" = xriscv64 ; then
     INCLUDE_SA=false
   fi
 

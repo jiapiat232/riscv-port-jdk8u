@@ -215,10 +215,10 @@ class Assembler : public AbstractAssembler {
   // Floating-point encoders
   static inline int32_t encode_r_fp(int funct7, FloatRegister rs2, FloatRegister rs1, int funct3, FloatRegister rd, int opcode) {
     return ((funct7 & 0x7f) << 25) |
-           ((rs2->encoding() & 0x1f) << 20) |
-           ((rs1->encoding() & 0x1f) << 15) |
+           (((rs2 == fnoreg ? 0 : rs2->encoding()) & 0x1f) << 20) |
+           (((rs1 == fnoreg ? 0 : rs1->encoding()) & 0x1f) << 15) |
            ((funct3 & 0x7) << 12) |
-           ((rd->encoding() & 0x1f) << 7) |
+           (((rd == fnoreg ? 0 : rd->encoding()) & 0x1f) << 7) |
            (opcode & 0x7f);
   }
 
@@ -434,8 +434,8 @@ class Assembler : public AbstractAssembler {
   void fmul_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0001001, rs2, rs1, 0b111, rd, OP_FP)); }
   void fdiv_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0001101, rs2, rs1, 0b111, rd, OP_FP)); }
 
-  void fsqrt_s(FloatRegister rd, FloatRegister rs1) { emit_int32(encode_r_fp(0b0101100, (FloatRegister)0, rs1, 0b111, rd, OP_FP)); }
-  void fsqrt_d(FloatRegister rd, FloatRegister rs1) { emit_int32(encode_r_fp(0b0101101, (FloatRegister)0, rs1, 0b111, rd, OP_FP)); }
+  void fsqrt_s(FloatRegister rd, FloatRegister rs1) { emit_int32(encode_r_fp(0b0101100, fnoreg, rs1, 0b111, rd, OP_FP)); }
+  void fsqrt_d(FloatRegister rd, FloatRegister rs1) { emit_int32(encode_r_fp(0b0101101, fnoreg, rs1, 0b111, rd, OP_FP)); }
 
   void fsgnj_s(FloatRegister rd, FloatRegister rs1, FloatRegister rs2)  { emit_int32(encode_r_fp(0b0010000, rs2, rs1, 0b000, rd, OP_FP)); }
   void fsgnjn_s(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0010000, rs2, rs1, 0b001, rd, OP_FP)); }

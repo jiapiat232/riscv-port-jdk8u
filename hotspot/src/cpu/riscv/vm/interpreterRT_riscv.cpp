@@ -43,74 +43,25 @@ Register InterpreterRuntime::SignatureHandlerGenerator::from() { return xlocals;
 Register InterpreterRuntime::SignatureHandlerGenerator::to()   { return sp; }
 Register InterpreterRuntime::SignatureHandlerGenerator::temp() { return t0; }
 
-void InterpreterRuntime::SignatureHandlerGenerator::pass_int() {
-  const Address src(from(), Interpreter::local_offset_in_bytes(offset()));
-  if (_num_reg_int_args < (unsigned int)Argument::n_int_register_parameters_c) {
-    __ lw(as_Register(10 + _num_reg_int_args++), src);
+Register InterpreterRuntime::SignatureHandlerGenerator::next_gpr() {
+  if (_num_reg_int_args < Argument::n_int_register_parameters_c - 1) {
+    return g_INTArgReg[++_num_reg_int_args];
+  }
+  return noreg;
+}
+
+FloatRegister InterpreterRuntime::SignatureHandlerGenerator::next_fpr() {
+  if (_num_reg_fp_args < Argument::n_float_register_parameters_c) {
+    return g_FPArgReg[_num_reg_fp_args++];
   } else {
-    __ lw(t0, src);
-    __ sd(t0, Address(to(), _stack_offset));
-    _stack_offset += wordSize;
-    _num_reg_int_args++;
+    return fnoreg;
   }
 }
 
-void InterpreterRuntime::SignatureHandlerGenerator::pass_long() {
-  const Address src(from(), Interpreter::local_offset_in_bytes(offset() + 1));
-  if (_num_reg_int_args < (unsigned int)Argument::n_int_register_parameters_c) {
-    __ ld(as_Register(10 + _num_reg_int_args++), src);
-  } else {
-    __ ld(t0, src);
-    __ sd(t0, Address(to(), _stack_offset));
-    _stack_offset += wordSize;
-    _num_reg_int_args++;
-  }
-}
-
-void InterpreterRuntime::SignatureHandlerGenerator::pass_float() {
-  const Address src(from(), Interpreter::local_offset_in_bytes(offset()));
-  if (_num_reg_fp_args < (unsigned int)Argument::n_float_register_parameters_c) {
-    __ flw(as_FloatRegister(10 + _num_reg_fp_args++), src);
-  } else {
-    __ flw(f0, src);
-    __ fsd(f0, Address(to(), _stack_offset));
-    _stack_offset += wordSize;
-    _num_reg_fp_args++;
-  }
-}
-
-void InterpreterRuntime::SignatureHandlerGenerator::pass_double() {
-  const Address src(from(), Interpreter::local_offset_in_bytes(offset() + 1));
-  if (_num_reg_fp_args < (unsigned int)Argument::n_float_register_parameters_c) {
-    __ fld(as_FloatRegister(10 + _num_reg_fp_args++), src);
-  } else {
-    __ fld(f0, src);
-    __ fsd(f0, Address(to(), _stack_offset));
-    _stack_offset += wordSize;
-    _num_reg_fp_args++;
-  }
-}
-
-void InterpreterRuntime::SignatureHandlerGenerator::pass_object() {
-  if (_num_reg_int_args < (unsigned int)Argument::n_int_register_parameters_c) {
-    Register dst = as_Register(10 + _num_reg_int_args++);
-    __ addi(dst, from(), Interpreter::local_offset_in_bytes(offset()));
-    __ ld(temp(), Address(dst, 0));
-    Label L;
-    __ bnez(temp(), L);
-    __ mv(dst, zr);
-    __ bind(L);
-  } else {
-    __ addi(t1, from(), Interpreter::local_offset_in_bytes(offset()));
-    __ ld(temp(), Address(t1, 0));
-    Label L;
-    __ bnez(temp(), L);
-    __ mv(t1, zr);
-    __ bind(L);
-    __ sd(t1, Address(to(), _stack_offset));
-    _stack_offset += wordSize;
-    _num_reg_int_args++;
-  }
+int InterpreterRuntime::SignatureHandlerGenerator::next_stack_offset() {
+  int ret = _stack_offset;
+  _stack_offset += wordSize;
+  return ret;
 }
 
 InterpreterRuntime::SignatureHandlerGenerator::SignatureHandlerGenerator(methodHandle method, CodeBuffer* buffer) : NativeSignatureIterator(method) {
@@ -120,8 +71,194 @@ InterpreterRuntime::SignatureHandlerGenerator::SignatureHandlerGenerator(methodH
   _stack_offset = 0;
 }
 
+void InterpreterRuntime::SignatureHandlerGenerator::pass_int() {
+  const Address src(from(), Interpreter::local_offset_in_bytes(offset()));
+  Register reg = next_gpr();
+  if (reg != noreg) {
+    __ lw(reg, src);
+  } else {
+    __ lw(x10, src);
+    __ sw(x10, Address(to(), next_stack_offset()));
+  }
+}
+
+void InterpreterRuntime::SignatureHandlerGenerator::pass_long() {
+  const Address src(from(), Interpreter::local_offset_in_bytes(offset() + 1));
+  Register reg = next_gpr();
+  if (reg != noreg) {
+    __ ld(reg, src);
+  } else {
+    __ ld(x10, src);
+    __ sd(x10, Address(to(), next_stack_offset()));
+  }
+}
+
+void InterpreterRuntime::SignatureHandlerGenerator::pass_float() {
+  const Address src(from(), Interpreter::local_offset_in_bytes(offset()));
+  FloatRegister reg = next_fpr();
+  if (reg != fnoreg) {
+    __ flw(reg, src);
+  } else {
+    pass_int();
+  }
+}
+
+void InterpreterRuntime::SignatureHandlerGenerator::pass_double() {
+  const Address src(from(), Interpreter::local_offset_in_bytes(offset() + 1));
+  FloatRegister reg = next_fpr();
+  if (reg != fnoreg) {
+    __ fld(reg, src);
+  } else {
+    pass_long();
+  }
+}
+
+void InterpreterRuntime::SignatureHandlerGenerator::pass_object() {
+  Register reg = next_gpr();
+  if (reg == c_rarg1) {
+    assert(offset() == 0, "argument register 1 can only be (non-null) receiver");
+    __ addi(c_rarg1, from(), Interpreter::local_offset_in_bytes(offset()));
+  } else if (reg != noreg) {
+    __ addi(x10, from(), Interpreter::local_offset_in_bytes(offset()));
+    __ mv(reg, zr);
+    __ ld(temp(), Address(x10, 0));
+    Label L;
+    __ beqz(temp(), L);
+    __ mv(reg, x10);
+    __ bind(L);
+  } else {
+    __ addi(x10, from(), Interpreter::local_offset_in_bytes(offset()));
+    __ ld(temp(), Address(x10, 0));
+    Label L;
+    __ bnez(temp(), L);
+    __ mv(x10, zr);
+    __ bind(L);
+    assert(sizeof(jobject) == wordSize, "");
+    __ sd(x10, Address(to(), next_stack_offset()));
+  }
+}
+
 void InterpreterRuntime::SignatureHandlerGenerator::generate(uint64_t fingerprint) {
+  // generate code to handle arguments
   iterate(fingerprint);
+
+  // return result handler in x10
+  __ la(x10, Interpreter::result_handler(method()->result_type()));
   __ ret();
+
   __ flush();
 }
+
+// Implementation of SignatureHandlerLibrary
+void SignatureHandlerLibrary::pd_set_handler(address handler) {}
+
+class SlowSignatureHandler : public NativeSignatureIterator {
+ private:
+  address   _from;
+  intptr_t* _to;
+  intptr_t* _int_args;
+  intptr_t* _fp_args;
+  intptr_t* _fp_identifiers;
+  unsigned int _num_reg_int_args;
+  unsigned int _num_reg_fp_args;
+
+  intptr_t* single_slot_addr() {
+    intptr_t* from_addr = (intptr_t*)(_from + Interpreter::local_offset_in_bytes(0));
+    _from -= Interpreter::stackElementSize;
+    return from_addr;
+  }
+
+  intptr_t* double_slot_addr() {
+    intptr_t* from_addr = (intptr_t*)(_from + Interpreter::local_offset_in_bytes(1));
+    _from -= 2 * Interpreter::stackElementSize;
+    return from_addr;
+  }
+
+  int pass_gpr(intptr_t value) {
+    if (_num_reg_int_args < Argument::n_int_register_parameters_c - 1) {
+      *_int_args++ = value;
+      return _num_reg_int_args++;
+    }
+    return -1;
+  }
+
+  int pass_fpr(intptr_t value) {
+    if (_num_reg_fp_args < Argument::n_float_register_parameters_c) {
+      *_fp_args++ = value;
+      return _num_reg_fp_args++;
+    }
+    return -1;
+  }
+
+  void pass_stack(intptr_t value) {
+    *_to++ = value;
+  }
+
+  virtual void pass_int() {
+    jint value = *(jint*)single_slot_addr();
+    if (pass_gpr(value) < 0) {
+      pass_stack(value);
+    }
+  }
+
+  virtual void pass_long() {
+    intptr_t value = *double_slot_addr();
+    if (pass_gpr(value) < 0) {
+      pass_stack(value);
+    }
+  }
+
+  virtual void pass_object() {
+    intptr_t* addr = single_slot_addr();
+    intptr_t value = *addr == 0 ? 0 : (intptr_t)addr;
+    if (pass_gpr(value) < 0) {
+      pass_stack(value);
+    }
+  }
+
+  virtual void pass_float() {
+    jint value = *(jint*)single_slot_addr();
+    if (pass_fpr(value) < 0 && pass_gpr(value) < 0) {
+      pass_stack(value);
+    }
+  }
+
+  virtual void pass_double() {
+    intptr_t value = *double_slot_addr();
+    int arg = pass_fpr(value);
+    if (0 <= arg) {
+      *_fp_identifiers |= (1ull << arg);
+    } else if (pass_gpr(value) < 0) {
+      pass_stack(value);
+    }
+  }
+
+ public:
+  SlowSignatureHandler(methodHandle method, address from, intptr_t* to)
+    : NativeSignatureIterator(method)
+  {
+    _from = from;
+    _to   = to;
+
+    _int_args = to - (method->is_static() ? 16 : 17);
+    _fp_args  = to - 8;
+    _fp_identifiers = to - 9;
+    *(int*) _fp_identifiers = 0;
+    _num_reg_int_args = (method->is_static() ? 1 : 0);
+    _num_reg_fp_args = 0;
+  }
+};
+
+IRT_ENTRY(address,
+          InterpreterRuntime::slow_signature_handler(JavaThread* thread,
+                                                     Method* method,
+                                                     intptr_t* from,
+                                                     intptr_t* to))
+  methodHandle m(thread, (Method*)method);
+  assert(m->is_native(), "sanity check");
+
+  SlowSignatureHandler ssh(m, (address)from, to);
+  ssh.iterate(UCONST64(-1));
+
+  return Interpreter::result_handler(m->result_type());
+IRT_END

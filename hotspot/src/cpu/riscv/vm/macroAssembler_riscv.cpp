@@ -33,10 +33,32 @@
 #include "oops/instanceKlass.hpp"
 #include "runtime/os.hpp"
 #include "runtime/thread.hpp"
+#include "memory/metaspace.hpp"
+#include "oops/method.hpp"
 
 // -------------------------------------------------------------
 // 64-bit Pointer and Constant Loading (movptr)
 // -------------------------------------------------------------
+void MacroAssembler::movptr_with_offset(Register Rd, address addr, int32_t &offset) {
+  int64_t imm64 = (int64_t)addr;
+  // Load upper 31 bits
+  int64_t imm = imm64 >> 17;
+  int64_t upper = imm, lower = imm;
+  lower = (lower << 52) >> 52;
+  upper -= lower;
+  upper = (int32_t)upper;
+  lui(Rd, upper);
+  addi(Rd, Rd, lower);
+
+  // Load the rest 17 bits.
+  slli(Rd, Rd, 11);
+  addi(Rd, Rd, (imm64 >> 6) & 0x7ff);
+  slli(Rd, Rd, 6);
+
+  // This offset will be used by following jalr/ld.
+  offset = imm64 & 0x3f;
+}
+
 void MacroAssembler::movptr(Register dst, intptr_t val) {
   if (val == 0) {
     mv(dst, zr);
@@ -56,28 +78,11 @@ void MacroAssembler::movptr(Register dst, intptr_t val) {
     return;
   }
 
-  // General 64-bit decomposition: upper 32 bits and lower 32 bits
-  int64_t upper = (int64_t)val >> 32;
-  int32_t lower = (int32_t)val;
-
-  movptr(dst, upper);
-  slli(dst, dst, 32);
-
-  if (lower != 0) {
-    if (is_simm12(lower)) {
-      addi(dst, dst, lower);
-    } else {
-      Register tmp = t0;
-      int32_t lo12 = (lower << 20) >> 20;
-      int32_t hi20 = ((lower - lo12) >> 12) & 0xfffff;
-      lui(tmp, hi20 << 12);
-      if (lo12 != 0) {
-        addiw(tmp, tmp, lo12);
-      }
-      slli(tmp, tmp, 32);
-      srli(tmp, tmp, 32);
-      orr(dst, dst, tmp);
-    }
+  // 48-bit address/pointer without using any scratch register
+  int32_t offset = 0;
+  movptr_with_offset(dst, (address)val, offset);
+  if (offset != 0) {
+    addi(dst, dst, offset);
   }
 }
 
@@ -271,24 +276,36 @@ void MacroAssembler::bang_stack_with_offset(int offset) {
   sd(zr, Address(sp, -offset));
 }
 
+// Java expression stack operations (esp)
+// Conforms to AArch64 port design and HotSpot interpreter conventions:
+// push/pop on registers manipulate Java expression stack (esp).
+// C stack (sp) operations require explicit 16-byte alignment under RISC-V ABI.
 void MacroAssembler::push(Register r) {
-  addi(sp, sp, -wordSize);
-  sd(r, Address(sp, 0));
+  addi(esp, esp, -wordSize);
+  sd(r, Address(esp, 0));
 }
 
 void MacroAssembler::pop(Register r) {
-  ld(r, Address(sp, 0));
-  addi(sp, sp, wordSize);
+  ld(r, Address(esp, 0));
+  addi(esp, esp, wordSize);
 }
 
 void MacroAssembler::push(FloatRegister r) {
-  addi(sp, sp, -wordSize);
-  fsd(r, Address(sp, 0));
+  addi(esp, esp, -wordSize);
+  fsd(r, Address(esp, 0));
 }
 
 void MacroAssembler::pop(FloatRegister r) {
-  fld(r, Address(sp, 0));
-  addi(sp, sp, wordSize);
+  fld(r, Address(esp, 0));
+  addi(esp, esp, wordSize);
+}
+
+void MacroAssembler::push_reg(Register r) {
+  push(r);
+}
+
+void MacroAssembler::pop_reg(Register r) {
+  pop(r);
 }
 
 void MacroAssembler::enter() {
@@ -351,6 +368,19 @@ void MacroAssembler::la(Register Rd, const Address& adr) {
 
 void MacroAssembler::la(Register Rd, const address addr) {
   movptr(Rd, (intptr_t)addr);
+}
+
+void MacroAssembler::la(Register Rd, Label& L) {
+  if (L.is_bound()) {
+    int64_t distance = target(L) - pc();
+    auipc(Rd, (int32_t)distance + 0x800);
+    int32_t offset = ((int32_t)distance << 20) >> 20;
+    addi(Rd, Rd, offset);
+  } else {
+    L.add_patch_at(code(), locator());
+    auipc(Rd, 0);
+    addi(Rd, Rd, 0);
+  }
 }
 
 // -------------------------------------------------------------
@@ -458,6 +488,16 @@ void MacroAssembler::pd_patch_instruction(address branch, address target) {
     insn &= 0xfff;
     insn |= (imm20 << 31) | (imm10_1 << 21) | (imm11 << 20) | (imm19_12 << 12);
     *(uint32_t*)branch = insn;
+  } else if (opcode == 0x17) { // AUIPC (PC-relative pair: auipc + addi)
+    uint32_t insn2 = *(uint32_t*)(branch + 4);
+    assert((insn2 & 0x7f) == 0x13, "expected addi following auipc");
+    insn &= 0xfff;
+    insn |= (((offset + 0x800) >> 12) & 0xfffff) << 12;
+    *(uint32_t*)branch = insn;
+
+    insn2 &= 0x000fffff;
+    insn2 |= ((uint32_t)(offset & 0xfff)) << 20;
+    *(uint32_t*)(branch + 4) = insn2;
   } else {
     guarantee(false, "unsupported branch instruction to patch");
   }
@@ -735,11 +775,14 @@ void MacroAssembler::g1_write_barrier_pre(Register obj,
 
   bind(runtime);
   if (tosca_live) {
-    push(x10);
+    // Preserve x10 across runtime leaf call on C stack (sp) with 16-byte alignment
+    addi(sp, sp, -16);
+    sd(x10, Address(sp, 0));
   }
   call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::g1_wb_pre), pre_val, thread);
   if (tosca_live) {
-    pop(x10);
+    ld(x10, Address(sp, 0));
+    addi(sp, sp, 16);
   }
 
   bind(done);
@@ -806,15 +849,15 @@ void MacroAssembler::set_last_Java_frame(Register last_java_sp,
                                          Register last_java_fp,
                                          address  last_java_pc,
                                          Register tmp) {
-  if (last_java_sp->is_valid()) {
-    sd(last_java_sp, Address(xthread, JavaThread::last_Java_sp_offset()));
+  if (last_java_pc != NULL) {
+    movptr(tmp, (intptr_t)last_java_pc);
+    sd(tmp, Address(xthread, JavaThread::last_Java_pc_offset()));
   }
   if (last_java_fp->is_valid()) {
     sd(last_java_fp, Address(xthread, JavaThread::last_Java_fp_offset()));
   }
-  if (last_java_pc != NULL) {
-    movptr(tmp, (intptr_t)last_java_pc);
-    sd(tmp, Address(xthread, JavaThread::last_Java_pc_offset()));
+  if (last_java_sp->is_valid()) {
+    sd(last_java_sp, Address(xthread, JavaThread::last_Java_sp_offset()));
   }
 }
 
@@ -822,12 +865,13 @@ void MacroAssembler::set_last_Java_frame(Register last_java_sp,
                                          Register last_java_fp,
                                          Label& L,
                                          Register tmp) {
-  if (L.is_bound()) {
-    set_last_Java_frame(last_java_sp, last_java_fp, target(L), tmp);
-  } else {
-    InstructionMark im(this);
-    L.add_patch_at(code(), locator());
-    set_last_Java_frame(last_java_sp, last_java_fp, (address)NULL, tmp);
+  la(tmp, L);
+  sd(tmp, Address(xthread, JavaThread::last_Java_pc_offset()));
+  if (last_java_fp->is_valid()) {
+    sd(last_java_fp, Address(xthread, JavaThread::last_Java_fp_offset()));
+  }
+  if (last_java_sp->is_valid()) {
+    sd(last_java_sp, Address(xthread, JavaThread::last_Java_sp_offset()));
   }
 }
 
@@ -842,92 +886,146 @@ void MacroAssembler::reset_last_Java_frame(bool clear_fp) {
 // -------------------------------------------------------------
 // Runtime Calls (call_VM)
 // -------------------------------------------------------------
-void MacroAssembler::call_VM_leaf(address entry_point, int number_of_arguments) {
+void MacroAssembler::call_VM_leaf_base(address entry_point,
+                                       int number_of_arguments,
+                                       Label *retaddr) {
+  // Push t0 and xmethod (x31/t6) to sp.
+  // In RISC-V psABI, t6 and t0 are caller-saved and will be clobbered by C/C++ VM calls.
+  // Pushing 2 registers (16 bytes) also maintains 16-byte stack alignment.
+  subi(sp, sp, 2 * wordSize);
+  sd(t0, Address(sp, 0));
+  sd(xmethod, Address(sp, wordSize));
+
   call(entry_point);
+
+  if (retaddr != NULL) {
+    bind(*retaddr);
+  }
+
+  ld(t0, Address(sp, 0));
+  ld(xmethod, Address(sp, wordSize));
+  addi(sp, sp, 2 * wordSize);
+}
+
+void MacroAssembler::call_VM_leaf(address entry_point, int number_of_arguments) {
+  call_VM_leaf_base(entry_point, number_of_arguments);
 }
 
 void MacroAssembler::call_VM_leaf(address entry_point, Register arg_1) {
   mv(c_rarg0, arg_1);
-  call(entry_point);
+  call_VM_leaf_base(entry_point, 1);
 }
 
 void MacroAssembler::call_VM_leaf(address entry_point, Register arg_1, Register arg_2) {
   mv(c_rarg0, arg_1);
   mv(c_rarg1, arg_2);
-  call(entry_point);
+  call_VM_leaf_base(entry_point, 2);
 }
 
 void MacroAssembler::call_VM_leaf(address entry_point, Register arg_1, Register arg_2, Register arg_3) {
   mv(c_rarg0, arg_1);
   mv(c_rarg1, arg_2);
   mv(c_rarg2, arg_3);
-  call(entry_point);
+  call_VM_leaf_base(entry_point, 3);
+}
+
+void MacroAssembler::call_VM_base(Register oop_result,
+                                  Register java_thread,
+                                  Register last_java_sp,
+                                  address  entry_point,
+                                  int      number_of_arguments,
+                                  bool     check_exceptions) {
+  if (!java_thread->is_valid()) {
+    java_thread = xthread;
+  }
+  if (!last_java_sp->is_valid()) {
+    last_java_sp = esp;
+  }
+
+  assert(number_of_arguments >= 0, "cannot have negative number of arguments");
+  assert(java_thread == xthread, "unexpected register");
+  assert(java_thread != oop_result, "cannot use the same register for java_thread & oop_result");
+  assert(java_thread != last_java_sp, "cannot use the same register for java_thread & last_java_sp");
+
+  // push java thread (becomes first argument of C function)
+  mv(c_rarg0, java_thread);
+
+  // set last Java frame before call
+  assert(last_java_sp != fp, "can't use fp");
+
+  Label l;
+  set_last_Java_frame(last_java_sp, fp, l, t0);
+
+  // call VM entry point
+  call_VM_leaf_base(entry_point, number_of_arguments, &l);
+
+  // reset last Java frame
+  reset_last_Java_frame(true);
+
+  check_and_handle_popframe(java_thread);
+  check_and_handle_earlyret(java_thread);
+
+  if (check_exceptions) {
+    ld(t0, Address(java_thread, in_bytes(Thread::pending_exception_offset())));
+    Label ok;
+    beqz(t0, ok);
+    far_jump(RuntimeAddress(StubRoutines::forward_exception_entry()));
+    bind(ok);
+  }
+
+  if (oop_result->is_valid()) {
+    get_vm_result(oop_result, java_thread);
+  }
 }
 
 void MacroAssembler::call_VM(Register oop_result, address entry_point, bool check_exceptions) {
-  mv(c_rarg0, xthread);
-  call(entry_point);
-  if (oop_result->is_valid()) {
-    ld(oop_result, Address(xthread, JavaThread::vm_result_offset()));
-    sd(zr, Address(xthread, JavaThread::vm_result_offset()));
-  }
+  call_VM(oop_result, noreg, entry_point, 0, check_exceptions);
 }
 
 void MacroAssembler::call_VM(Register oop_result, address entry_point, Register arg_1, bool check_exceptions) {
-  mv(c_rarg0, xthread);
   mv(c_rarg1, arg_1);
-  call(entry_point);
-  if (oop_result->is_valid()) {
-    ld(oop_result, Address(xthread, JavaThread::vm_result_offset()));
-    sd(zr, Address(xthread, JavaThread::vm_result_offset()));
-  }
+  call_VM(oop_result, noreg, entry_point, 1, check_exceptions);
 }
 
 void MacroAssembler::call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, bool check_exceptions) {
-  mv(c_rarg0, xthread);
-  mv(c_rarg1, arg_1);
+  assert(arg_1 != c_rarg2, "smashed arg");
   mv(c_rarg2, arg_2);
-  call(entry_point);
-  if (oop_result->is_valid()) {
-    ld(oop_result, Address(xthread, JavaThread::vm_result_offset()));
-    sd(zr, Address(xthread, JavaThread::vm_result_offset()));
-  }
+  mv(c_rarg1, arg_1);
+  call_VM(oop_result, noreg, entry_point, 2, check_exceptions);
 }
 
 void MacroAssembler::call_VM(Register oop_result, address entry_point, Register arg_1, Register arg_2, Register arg_3, bool check_exceptions) {
-  mv(c_rarg0, xthread);
-  mv(c_rarg1, arg_1);
-  mv(c_rarg2, arg_2);
+  assert(arg_1 != c_rarg3 && arg_2 != c_rarg3, "smashed arg");
   mv(c_rarg3, arg_3);
-  call(entry_point);
-  if (oop_result->is_valid()) {
-    ld(oop_result, Address(xthread, JavaThread::vm_result_offset()));
-    sd(zr, Address(xthread, JavaThread::vm_result_offset()));
-  }
+  assert(arg_1 != c_rarg2, "smashed arg");
+  mv(c_rarg2, arg_2);
+  mv(c_rarg1, arg_1);
+  call_VM(oop_result, noreg, entry_point, 3, check_exceptions);
 }
 
 void MacroAssembler::call_VM(Register oop_result, Register last_java_sp, address entry_point, int number_of_arguments, bool check_exceptions) {
-  set_last_Java_frame(last_java_sp, fp, NULL, t0);
-  call_VM(oop_result, entry_point, check_exceptions);
-  reset_last_Java_frame(false);
+  call_VM_base(oop_result, xthread, last_java_sp, entry_point, number_of_arguments, check_exceptions);
 }
 
 void MacroAssembler::call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, bool check_exceptions) {
-  set_last_Java_frame(last_java_sp, fp, NULL, t0);
-  call_VM(oop_result, entry_point, arg_1, check_exceptions);
-  reset_last_Java_frame(false);
+  mv(c_rarg1, arg_1);
+  call_VM(oop_result, last_java_sp, entry_point, 1, check_exceptions);
 }
 
 void MacroAssembler::call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, Register arg_2, bool check_exceptions) {
-  set_last_Java_frame(last_java_sp, fp, NULL, t0);
-  call_VM(oop_result, entry_point, arg_1, arg_2, check_exceptions);
-  reset_last_Java_frame(false);
+  assert(arg_1 != c_rarg2, "smashed arg");
+  mv(c_rarg2, arg_2);
+  mv(c_rarg1, arg_1);
+  call_VM(oop_result, last_java_sp, entry_point, 2, check_exceptions);
 }
 
 void MacroAssembler::call_VM(Register oop_result, Register last_java_sp, address entry_point, Register arg_1, Register arg_2, Register arg_3, bool check_exceptions) {
-  set_last_Java_frame(last_java_sp, fp, NULL, t0);
-  call_VM(oop_result, entry_point, arg_1, arg_2, arg_3, check_exceptions);
-  reset_last_Java_frame(false);
+  assert(arg_1 != c_rarg3 && arg_2 != c_rarg3, "smashed arg");
+  mv(c_rarg3, arg_3);
+  assert(arg_1 != c_rarg2, "smashed arg");
+  mv(c_rarg2, arg_2);
+  mv(c_rarg1, arg_1);
+  call_VM(oop_result, last_java_sp, entry_point, 3, check_exceptions);
 }
 
 void MacroAssembler::get_vm_result(Register oop_result, Register java_thread) {
@@ -1404,4 +1502,77 @@ void MacroAssembler::subw(Register Rd, Register Rn, int64_t decrement, Register 
   }
 }
 
+#ifndef PRODUCT
+void MacroAssembler::verify_oop(Register reg, const char* s) {
+}
 
+void MacroAssembler::verify_oop_addr(Address addr, const char* s) {
+}
+#endif
+
+bool AbstractAssembler::pd_check_instruction_mark() {
+  return false;
+}
+
+void MacroAssembler::mov_metadata(Register dst, Metadata* obj) {
+  int oop_index;
+  if (obj == NULL) {
+    oop_index = oop_recorder()->allocate_metadata_index(obj);
+  } else {
+    oop_index = oop_recorder()->find_index(obj);
+  }
+  RelocationHolder rspec = metadata_Relocation::spec(oop_index);
+  movptr(dst, (intptr_t)obj);
+}
+
+void MacroAssembler::movoop(Register dst, jobject obj) {
+  int oop_index;
+  if (obj == NULL) {
+    oop_index = oop_recorder()->allocate_oop_index(obj);
+  } else {
+    oop_index = oop_recorder()->find_index(obj);
+  }
+  RelocationHolder rspec = oop_Relocation::spec(oop_index);
+  movptr(dst, (intptr_t)obj);
+}
+
+#include "memory/resourceArea.hpp"
+
+void MacroAssembler::debug64(char* msg, address bcp, Method* m, intptr_t dispatched_bc) {
+  ResourceMark rm;
+  ttyLocker ttyl;
+  int bc = -1;
+  if (bcp != NULL) {
+    bc = (unsigned char)*bcp;
+  }
+  tty->print_cr("### MacroAssembler::stop: %s", msg ? msg : "unknown");
+  tty->print_cr("    dispatched_bc = " INTPTR_FORMAT " (%s)",
+                dispatched_bc,
+                (dispatched_bc >= 0 && dispatched_bc < Bytecodes::number_of_codes) ? Bytecodes::name((Bytecodes::Code)dispatched_bc) : "unknown");
+  tty->print_cr("    bcp = " INTPTR_FORMAT " (*bcp = %d %s)",
+                p2i(bcp), bc,
+                (bc >= 0 && bc < Bytecodes::number_of_codes) ? Bytecodes::name((Bytecodes::Code)bc) : "unknown");
+  if (bcp != NULL) {
+    tty->print("    bytes around bcp [-8..+15]: ");
+    for (int i = -8; i < 16; i++) {
+      tty->print("%02x ", (unsigned char)bcp[i]);
+    }
+    tty->cr();
+  }
+  if (m != NULL && Metaspace::contains(m)) {
+    tty->print_cr("    method = %s", m->name_and_sig_as_C_string());
+    tty->print_cr("    code_base = " INTPTR_FORMAT ", code_size = %d, bci = %d",
+                  p2i(m->code_base()), m->code_size(), (int)(bcp - m->code_base()));
+  }
+  fatal(err_msg("MacroAssembler::stop: %s", msg ? msg : "unknown"));
+}
+
+void MacroAssembler::stop(const char* msg) {
+  mv(c_rarg3, t0);
+  movptr(c_rarg0, (intptr_t)msg);
+  mv(c_rarg1, xbcp);
+  mv(c_rarg2, xmethod);
+  movptr(t0, CAST_FROM_FN_PTR(intptr_t, MacroAssembler::debug64));
+  jalr(t0);
+  ebreak();
+}

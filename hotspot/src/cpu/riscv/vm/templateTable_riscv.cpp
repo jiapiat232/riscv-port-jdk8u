@@ -662,25 +662,29 @@ void TemplateTable::astore(int n) {
 }
 
 void TemplateTable::wide_istore() {
-  transition(itos, vtos);
+  transition(vtos, vtos);
+  __ pop_i();
   locals_index_wide(x11);
   __ sw(x10, iaddress(x11, t0, _masm));
 }
 
 void TemplateTable::wide_lstore() {
-  transition(ltos, vtos);
+  transition(vtos, vtos);
+  __ pop_l();
   locals_index_wide(x11);
   __ sd(x10, laddress(x11, t0, _masm));
 }
 
 void TemplateTable::wide_fstore() {
-  transition(ftos, vtos);
+  transition(vtos, vtos);
+  __ pop_f();
   locals_index_wide(x11);
   __ fsw(f10, faddress(x11, t0, _masm));
 }
 
 void TemplateTable::wide_dstore() {
-  transition(dtos, vtos);
+  transition(vtos, vtos);
+  __ pop_d();
   locals_index_wide(x11);
   __ fsd(f10, daddress(x11, t0, _masm));
 }
@@ -1366,6 +1370,7 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
     __ sub(x11, xbcp, t1);
     __ push_i(x11);
     __ add(xbcp, xbcp, x12);
+    __ lbu(t0, Address(xbcp, 0));
     __ dispatch_only(vtos);
     return;
   }
@@ -1410,6 +1415,7 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
     __ bind(dispatch);
   }
 
+  __ lbu(t0, Address(xbcp, 0));
   __ dispatch_only(vtos);
 
   if (UseLoopCounter && UseOnStackReplacement) {
@@ -1417,7 +1423,7 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
     __ neg(x12, x12);
     __ add(x12, x12, xbcp);
     __ call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::frequency_counter_overflow), x12);
-    __ lbu(x11, Address(xbcp, 0));
+    __ lbu(t0, Address(xbcp, 0));
 
     Label no_osr;
     __ beqz(x10, no_osr);
@@ -1540,6 +1546,7 @@ void TemplateTable::tableswitch() {
   __ bind(continue_execution);
   __ revbw(x13, x13);
   __ add(xbcp, xbcp, x13);
+  __ lbu(t0, Address(xbcp, 0));
   __ dispatch_only(vtos);
   // handle default
   __ bind(default_case);
@@ -1586,6 +1593,7 @@ void TemplateTable::fast_linearswitch() {
   __ bind(continue_execution);
   __ revbw(x13, x13);
   __ add(xbcp, xbcp, x13);
+  __ lbu(t0, Address(xbcp, 0));
   __ dispatch_only(vtos);
 }
 
@@ -1641,6 +1649,7 @@ void TemplateTable::fast_binaryswitch() {
   __ profile_switch_case(i, key, array);
   __ revbw(j, j);
   __ add(xbcp, xbcp, j);
+  __ lbu(t0, Address(xbcp, 0));
   __ dispatch_only(vtos);
 
   __ bind(default_case);
@@ -1648,6 +1657,7 @@ void TemplateTable::fast_binaryswitch() {
   __ lwu(j, Address(array, -2 * BytesPerInt));
   __ revbw(j, j);
   __ add(xbcp, xbcp, j);
+  __ lbu(t0, Address(xbcp, 0));
   __ dispatch_only(vtos);
 }
 
@@ -1660,7 +1670,7 @@ void TemplateTable::_return(TosState state) {
     __ ld(c_rarg1, aaddress(0));
     __ load_klass(x13, c_rarg1);
     __ lwu(x13, Address(x13, Klass::access_flags_offset()));
-    __ andi(t0, x13, JVM_ACC_HAS_FINALIZER);
+    __ test_bit(t0, x13, exact_log2(JVM_ACC_HAS_FINALIZER));
     Label skip_register_finalizer;
     __ beqz(t0, skip_register_finalizer);
 

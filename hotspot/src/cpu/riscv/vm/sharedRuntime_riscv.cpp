@@ -62,6 +62,11 @@ class RegisterSaver {
 
   static OopMap* save_live_registers(MacroAssembler* masm, int additional_frame_words, int* total_frame_words, bool save_vectors = false);
   static void restore_live_registers(MacroAssembler* masm, bool restore_vectors = false);
+
+  static int reg_offset_in_bytes(Register r) {
+    assert(r != sp && r != fp && r != ra, "special register offset");
+    return (r->encoding() - 1) * wordSize;
+  }
 };
 
 OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int additional_frame_words, int* total_frame_words, bool save_vectors) {
@@ -112,9 +117,15 @@ void RegisterSaver::restore_live_registers(MacroAssembler* masm, bool restore_ve
     }
   }
 
-  __ ld(ra, Address(fp, -1 * wordSize));
-  __ ld(fp, Address(fp, -2 * wordSize));
-  __ mv(sp, fp);
+  // Restore fp and ra, and unwind stack frame back to caller sp.
+  // Note: save_live_registers sets fp = caller_sp.
+  // Address(fp, -1 * wordSize) is caller_ra, Address(fp, -2 * wordSize) is caller_fp.
+  // We use the signal-safe sequence (matching upstream leave() semantics):
+  // move sp to the save area, load ra and fp, then advance sp to caller_sp.
+  __ addi(sp, fp, -2 * wordSize);
+  __ ld(ra, Address(sp, wordSize));
+  __ ld(fp, Address(sp, 0));
+  __ addi(sp, sp, 2 * wordSize);
 }
 
 // -------------------------------------------------------------
@@ -360,29 +371,46 @@ RuntimeStub* SharedRuntime::generate_resolve_blob(address destination, const cha
 
   OopMap* map = RegisterSaver::save_live_registers(masm, 0, &frame_size_in_words);
 
-  __ set_last_Java_frame(sp, noreg, NULL, t0);
+  int frame_complete = __ offset();
+
+  Label retaddr;
+  __ set_last_Java_frame(sp, noreg, retaddr, t0);
   __ mv(c_rarg0, xthread);
   __ call(destination);
+  __ bind(retaddr);
 
   oop_maps->add_gc_map(__ offset() - start, map);
   __ reset_last_Java_frame(false);
 
-  // Return address is in x10
-  __ mv(t1, x10);
-
-  Label noException;
+  // Check for pending exceptions
+  Label pending;
   __ ld(t0, Address(xthread, Thread::pending_exception_offset()));
-  __ beqz(t0, noException);
+  __ bnez(t0, pending);
+
+  // Get the returned Method*
+  __ get_vm_result_2(xmethod, xthread);
+  __ sd(xmethod, Address(sp, RegisterSaver::reg_offset_in_bytes(xmethod)));
+
+  // Destination address to jump to was returned in x10.
+  // Overwrite the saved t0 slot so restore_live_registers restores it into t0.
+  __ sd(x10, Address(sp, RegisterSaver::reg_offset_in_bytes(t0)));
+  RegisterSaver::restore_live_registers(masm);
+
+  // We are back to the original state on entry and ready to go.
+  __ jr(t0);
+
+  // Pending exception after the call
+  __ bind(pending);
 
   RegisterSaver::restore_live_registers(masm);
+
+  // Exception pending => remove activation and forward to exception handler
+  __ sd(zr, Address(xthread, JavaThread::vm_result_offset()));
+  __ ld(x10, Address(xthread, Thread::pending_exception_offset()));
   __ jmp(StubRoutines::forward_exception_entry());
 
-  __ bind(noException);
-  RegisterSaver::restore_live_registers(masm);
-  __ jr(t1);
-
   masm->flush();
-  return RuntimeStub::new_runtime_stub(name, &buffer, __ offset(), frame_size_in_words, oop_maps, false);
+  return RuntimeStub::new_runtime_stub(name, &buffer, frame_complete, frame_size_in_words, oop_maps, false);
 }
 
 // -------------------------------------------------------------
@@ -546,3 +574,14 @@ nmethod* SharedRuntime::generate_dtrace_nmethod(MacroAssembler *masm, methodHand
   return NULL;
 }
 #endif
+
+int Deoptimization::last_frame_adjust(int callee_parameters, int callee_locals) {
+  assert(callee_locals >= callee_parameters,
+          "test and remove; got more parms than locals");
+  if (callee_locals < callee_parameters)
+    return 0;                   // No adjustment for negative locals
+  int diff = (callee_locals - callee_parameters) * Interpreter::stackElementWords;
+  // diff is counted in stack words
+  return round_to(diff, 2);
+}
+

@@ -15,3 +15,5 @@ NashornProfile.txt
 **/JTwork/**
 config.log
 configure.log
+*.class
+docker/bin/

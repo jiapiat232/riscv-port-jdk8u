@@ -44,7 +44,16 @@
 #ifndef CC_INTERP
 
 void InterpreterMacroAssembler::call_VM_leaf_base(address entry_point, int number_of_arguments) {
-  MacroAssembler::call(entry_point);
+#ifdef ASSERT
+  {
+    Label L;
+    ld(t0, Address(fp, frame::interpreter_frame_last_sp_offset * wordSize));
+    beqz(t0, L);
+    stop("InterpreterMacroAssembler::call_VM_leaf_base: last_sp != NULL");
+    bind(L);
+  }
+#endif /* ASSERT */
+  MacroAssembler::call_VM_leaf_base(entry_point, number_of_arguments);
 }
 
 void InterpreterMacroAssembler::call_VM_base(Register oop_result,
@@ -53,9 +62,22 @@ void InterpreterMacroAssembler::call_VM_base(Register oop_result,
                                              address  entry_point,
                                              int number_of_arguments,
                                              bool check_exceptions) {
-  set_last_Java_frame(last_java_sp, fp, NULL, t0);
-  MacroAssembler::call_VM(oop_result, entry_point, check_exceptions);
-  reset_last_Java_frame(false);
+  // interpreter specific: bcp must be saved/restored since it may change due to GC
+  save_bcp();
+#ifdef ASSERT
+  {
+    Label L;
+    ld(t0, Address(fp, frame::interpreter_frame_last_sp_offset * wordSize));
+    beqz(t0, L);
+    stop("InterpreterMacroAssembler::call_VM_base: last_sp != NULL");
+    bind(L);
+  }
+#endif /* ASSERT */
+  // super call
+  MacroAssembler::call_VM_base(oop_result, java_thread, last_java_sp, entry_point, number_of_arguments, check_exceptions);
+  // interpreter specific
+  restore_bcp();
+  restore_locals();
 }
 
 void InterpreterMacroAssembler::check_and_handle_popframe(Register java_thread) {
@@ -188,7 +210,7 @@ void InterpreterMacroAssembler::store_ptr(int n, Register val) {
 }
 
 void InterpreterMacroAssembler::prepare_to_jump_from_interpreted() {
-  mv(t0, sp);
+  mv(x19_sender_sp, sp);
   sd(esp, Address(fp, frame::interpreter_frame_last_sp_offset * wordSize));
 }
 
@@ -203,14 +225,31 @@ void InterpreterMacroAssembler::get_dispatch() {
 }
 
 void InterpreterMacroAssembler::dispatch_base(TosState state, address* table, bool verifyoop) {
-  movptr(t1, (intptr_t)table);
-  slli(t2, t0, LogBytesPerWord);
-  add(t1, t1, t2);
+  if (table == Interpreter::dispatch_table(state)) {
+    int distance = Interpreter::distance_from_dispatch_table(state);
+    if (distance != 0) {
+      mv(t1, distance);
+      add(t1, t0, t1);
+      slli(t1, t1, LogBytesPerWord);
+      add(t1, xdispatch, t1);
+    } else {
+      slli(t1, t0, LogBytesPerWord);
+      add(t1, xdispatch, t1);
+    }
+  } else {
+    movptr(t1, (intptr_t)table);
+    slli(t2, t0, LogBytesPerWord);
+    add(t1, t1, t2);
+  }
   ld(t1, Address(t1, 0));
   jr(t1);
 }
 
 void InterpreterMacroAssembler::dispatch_only(TosState state) {
+  // dispatch_only dispatches the bytecode at xbcp without stepping xbcp.
+  // In RISC-V interpreter calling convention, dispatch_base indexes the
+  // dispatch table using t0 as the bytecode opcode, so t0 must be loaded here.
+  lbu(t0, Address(xbcp, 0));
   dispatch_base(state, Interpreter::dispatch_table(state));
 }
 
@@ -247,11 +286,21 @@ void InterpreterMacroAssembler::get_unsigned_2_byte_index_at_bcp(Register reg, i
 }
 
 void InterpreterMacroAssembler::get_cache_index_at_bcp(Register index, int bcp_offset, size_t index_size) {
+  assert(bcp_offset > 0, "bcp is still pointing to start of bytecode");
   if (index_size == sizeof(u2)) {
-    get_unsigned_2_byte_index_at_bcp(index, bcp_offset);
+    load_unsigned_short(index, Address(xbcp, bcp_offset));
+  } else if (index_size == sizeof(u4)) {
+    assert(EnableInvokeDynamic, "giant index used only for JSR 292");
+    lwu(index, Address(xbcp, bcp_offset));
+    // Check if the secondary index definition is still ~x, otherwise
+    // we have to change the following assembler code to calculate the
+    // plain index.
+    assert(ConstantPool::decode_invokedynamic_index(~123) == 123, "else change next line");
+    notr(index, index);  // convert to plain index
+  } else if (index_size == sizeof(u1)) {
+    load_unsigned_byte(index, Address(xbcp, bcp_offset));
   } else {
-    assert(index_size == sizeof(u1), "size must be 1 or 2");
-    lbu(index, Address(xbcp, bcp_offset));
+    ShouldNotReachHere();
   }
 }
 
@@ -293,13 +342,7 @@ void InterpreterMacroAssembler::load_resolved_reference_at_index(Register result
   ld(result, Address(result, 0));
   slli(t0, index, LogBytesPerHeapOop);
   add(result, result, t0);
-  if (UseCompressedOops) {
-    lwu(result, Address(result, arrayOopDesc::base_offset_in_bytes(T_OBJECT)));
-    slli(result, result, LogMinObjAlignmentInBytes);
-    add(result, xheapbase, result);
-  } else {
-    ld(result, Address(result, arrayOopDesc::base_offset_in_bytes(T_OBJECT)));
-  }
+  load_heap_oop(result, Address(result, arrayOopDesc::base_offset_in_bytes(T_OBJECT)));
 }
 
 void InterpreterMacroAssembler::lock_object(Register lock_reg) {
@@ -314,6 +357,114 @@ void InterpreterMacroAssembler::remove_activation(TosState state,
                                                   bool throw_monitor_exception,
                                                   bool install_monitor_exception,
                                                   bool notify_jvmdi) {
+  // Note: Registers x13 may be in use for the result check if synchronized method
+  Label unlocked, unlock, no_unlock;
+
+  // get the value of _do_not_unlock_if_synchronized into x13
+  const Address do_not_unlock_if_synchronized(xthread,
+    in_bytes(JavaThread::do_not_unlock_if_synchronized_offset()));
+  lbu(x13, do_not_unlock_if_synchronized);
+  sb(zr, do_not_unlock_if_synchronized); // reset the flag
+
+  // get method access flags
+  ld(x11, Address(fp, frame::interpreter_frame_method_offset * wordSize));
+  lwu(x12, Address(x11, Method::access_flags_offset()));
+  andi(t0, x12, JVM_ACC_SYNCHRONIZED);
+  beqz(t0, unlocked);
+
+  // Don't unlock anything if the _do_not_unlock_if_synchronized flag is set
+  bnez(x13, no_unlock);
+
+  // unlock monitor
+  push(state); // save result to Java expression stack esp
+
+  // BasicObjectLock will be first in list, since this is a synchronized method.
+  // However, need to check that the object has not been unlocked by an explicit monitorexit.
+  const Address monitor(fp, frame::interpreter_frame_initial_sp_offset * wordSize - (int)sizeof(BasicObjectLock));
+  la(c_rarg1, monitor); // address of first monitor
+
+  ld(x10, Address(c_rarg1, BasicObjectLock::obj_offset_in_bytes()));
+  bnez(x10, unlock);
+
+  pop(state);
+  if (throw_monitor_exception) {
+    // Entry already unlocked, need to throw exception
+    call_VM(noreg, CAST_FROM_FN_PTR(address,
+                   InterpreterRuntime::throw_illegal_monitor_state_exception));
+    should_not_reach_here();
+  } else {
+    // Monitor already unlocked during a stack unroll. If requested,
+    // install an illegal_monitor_state_exception. Continue with stack unrolling.
+    if (install_monitor_exception) {
+      call_VM(noreg, CAST_FROM_FN_PTR(address,
+                     InterpreterRuntime::new_illegal_monitor_state_exception));
+    }
+    j(unlocked);
+  }
+
+  bind(unlock);
+  unlock_object(c_rarg1);
+  pop(state);
+
+  // Check that for block-structured locking (i.e., that all locked objects have been unlocked)
+  bind(unlocked);
+
+  // Check that all monitors are unlocked
+  {
+    Label loop, exception, entry, restart;
+    const int entry_size = frame::interpreter_frame_monitor_size() * wordSize;
+    const Address monitor_block_top(
+      fp, frame::interpreter_frame_monitor_block_top_offset * wordSize);
+    const Address monitor_block_bot(
+      fp, frame::interpreter_frame_initial_sp_offset * wordSize);
+
+    bind(restart);
+    // c_rarg1 points to current entry, starting with top-most entry
+    ld(c_rarg1, monitor_block_top);
+    la(x9, monitor_block_bot); // points to word before bottom of monitor block
+
+    j(entry);
+
+    // Entry already locked, need to throw exception
+    bind(exception);
+
+    if (throw_monitor_exception) {
+      // Throw exception
+      MacroAssembler::call_VM(noreg,
+                              CAST_FROM_FN_PTR(address, InterpreterRuntime::
+                                               throw_illegal_monitor_state_exception));
+      should_not_reach_here();
+    } else {
+      // Stack unrolling. Unlock object and install illegal_monitor_exception.
+      push(state);
+      unlock_object(c_rarg1);
+      pop(state);
+
+      if (install_monitor_exception) {
+        call_VM(noreg, CAST_FROM_FN_PTR(address,
+                                        InterpreterRuntime::
+                                        new_illegal_monitor_state_exception));
+      }
+
+      j(restart);
+    }
+
+    bind(loop);
+    // check if current entry is used
+    ld(t0, Address(c_rarg1, BasicObjectLock::obj_offset_in_bytes()));
+    bnez(t0, exception);
+
+    addi(c_rarg1, c_rarg1, entry_size); // advance to next entry
+    bind(entry);
+    bne(c_rarg1, x9, loop); // check if bottom reached
+  }
+
+  bind(no_unlock);
+
+  // jvmti support
+  notify_method_exit(state, notify_jvmdi ? NotifyJVMTI : SkipNotifyJVMTI);
+
+  // remove activation
   ld(esp, Address(fp, frame::interpreter_frame_sender_sp_offset * wordSize));
   leave();
   andi(sp, esp, -16);

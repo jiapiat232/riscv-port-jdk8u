@@ -41,6 +41,7 @@
 #include "runtime/arguments.hpp"
 #include "runtime/deoptimization.hpp"
 #include "runtime/frame.inline.hpp"
+#include "runtime/jniHandles.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/synchronizer.hpp"
@@ -631,6 +632,7 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
                CAST_FROM_FN_PTR(address,
                                 InterpreterRuntime::prepare_native_call),
                xmethod);
+    __ get_method(xmethod);
     __ ld(t, Address(xmethod, Method::signature_handler_offset()));
     __ bind(L);
   }
@@ -724,6 +726,81 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
 
   __ reset_last_Java_frame(true);
 
+  // reset handle block
+  __ ld(t, Address(xthread, JavaThread::active_handles_offset()));
+  __ sd(zr, Address(t, JNIHandleBlock::top_offset_in_bytes()));
+
+  // If result is an oop unbox and store it in frame where gc will see it
+  // and result handler will pick it up
+  {
+    Label no_oop, not_weak, store_result;
+    __ ld(result_handler, Address(fp, frame::interpreter_frame_result_handler_offset * wordSize));
+    __ movptr(t, (intptr_t)AbstractInterpreter::result_handler(T_OBJECT));
+    __ bne(t, result_handler, no_oop);
+
+    // Unbox oop result, e.g. JNIHandles::resolve result.
+    __ pop(ltos);
+    __ beqz(x10, store_result);   // Use NULL as-is.
+    STATIC_ASSERT(JNIHandles::weak_tag_mask == 1u);
+    __ test_bit(t0, x10, 0);      // Test for jweak tag.
+    __ beqz(t0, not_weak);
+
+    // Resolve jweak.
+    __ ld(x10, Address(x10, -JNIHandles::weak_tag_value));
+#if INCLUDE_ALL_GCS
+    if (UseG1GC) {
+      __ subi(sp, sp, 2 * wordSize);
+      __ sd(ra, Address(sp, wordSize));
+      __ sd(fp, Address(sp, 0));
+      __ mv(fp, sp);
+
+      __ g1_write_barrier_pre(noreg /* obj */,
+                              x10 /* pre_val */,
+                              xthread /* thread */,
+                              t /* tmp */,
+                              true /* tosca_live */,
+                              true /* expand_call */);
+
+      __ ld(fp, Address(sp, 0));
+      __ ld(ra, Address(sp, wordSize));
+      __ addi(sp, sp, 2 * wordSize);
+    }
+#endif // INCLUDE_ALL_GCS
+    __ j(store_result);
+
+    __ bind(not_weak);
+    // Resolve (untagged) jobject.
+    __ ld(x10, Address(x10, 0));
+
+    __ bind(store_result);
+    __ sd(x10, Address(fp, frame::interpreter_frame_oop_temp_offset * wordSize));
+    // keep stack depth as expected by pushing oop which will eventually be discarded
+    __ push(ltos);
+
+    __ bind(no_oop);
+  }
+
+  {
+    Label no_reguard;
+    __ lbu(t0, Address(xthread, in_bytes(JavaThread::stack_guard_state_offset())));
+    __ mv(t1, JavaThread::stack_guard_yellow_disabled);
+    __ bne(t0, t1, no_reguard);
+
+    __ subi(sp, sp, 2 * wordSize);
+    __ sd(ra, Address(sp, wordSize));
+    __ sd(fp, Address(sp, 0));
+    __ mv(fp, sp);
+
+    __ mv(c_rarg0, xthread);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::reguard_yellow_pages), c_rarg0);
+
+    __ ld(fp, Address(sp, 0));
+    __ ld(ra, Address(sp, wordSize));
+    __ addi(sp, sp, 2 * wordSize);
+
+    __ bind(no_reguard);
+  }
+
   // handle exceptions
   {
     Label L;
@@ -736,7 +813,9 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
 
   // unlock if synchronized
   if (synchronized) {
-    __ addi(c_rarg1, fp, frame::interpreter_frame_monitor_block_top_offset * wordSize);
+    const Address monitor(fp, (intptr_t)(frame::interpreter_frame_initial_sp_offset *
+                                         wordSize - sizeof(BasicObjectLock)));
+    __ la(c_rarg1, monitor);
     __ unlock_object(c_rarg1);
   }
 
@@ -1102,7 +1181,50 @@ void TemplateInterpreterGenerator::generate_throw_exception() {
   }
 #endif
 
+  // Restore machine SP
+  __ ld(t0, Address(xmethod, Method::const_offset()));
+  __ lhu(t0, Address(t0, ConstMethod::max_stack_offset()));
+  __ addi(t0, t0, frame::interpreter_frame_monitor_size() + (EnableInvokeDynamic ? 2 : 0));
+  __ slli(t0, t0, Interpreter::logStackElementSize);
+  __ ld(t1, Address(fp, frame::interpreter_frame_initial_sp_offset * wordSize));
+  __ sub(t0, t1, t0);
+  __ andi(sp, t0, -16);
+
   __ dispatch_next(vtos);
+  // end of PopFrame support
+
+  Interpreter::_remove_activation_entry = __ pc();
+
+  // preserve exception over this code sequence
+  __ pop_ptr(x10);
+  __ sd(x10, Address(xthread, JavaThread::vm_result_offset()));
+  // remove the activation (without doing throws on illegalMonitorExceptions)
+  __ remove_activation(vtos, false, true, false);
+  // restore exception
+  __ get_vm_result(x10, xthread);
+
+  // In between activations - previous activation type unknown yet
+  // compute continuation point - the continuation point expects the
+  // following registers set up:
+  //
+  // x10: exception
+  // ra: return address/pc that threw exception
+  // sp: expression stack of caller
+  // fp: fp of caller
+  __ subi(sp, sp, 2 * wordSize);
+  __ sd(x10, Address(sp, 0));                   // save exception
+  __ sd(ra, Address(sp, wordSize));             // save return address
+  __ MacroAssembler::call_VM_leaf(CAST_FROM_FN_PTR(address,
+                                                   SharedRuntime::exception_handler_for_return_address),
+                                  xthread, ra);
+  __ mv(x11, x10);                              // save exception handler
+  __ ld(x10, Address(sp, 0));                   // restore exception
+  __ ld(ra, Address(sp, wordSize));             // restore return address
+  __ addi(sp, sp, 2 * wordSize);
+  // We might be returning to a deopt handler that expects x13 to
+  // contain the exception pc
+  __ mv(x13, ra);
+  __ jr(x11);                                   // jump to exception handler of caller
 }
 
 address TemplateInterpreterGenerator::generate_earlyret_entry_for(TosState state) {

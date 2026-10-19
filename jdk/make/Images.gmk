@@ -231,11 +231,14 @@ ifeq ($(PROFILE), )
   NOT_JRE_LIB_FILES := \
       tools.jar \
       jconsole.jar \
-      sa-jdi.jar \
       dt.jar \
       orb.idl \
       ir.idl \
       ct.sym
+
+  ifeq ($(INCLUDE_SA), true)
+    NOT_JRE_LIB_FILES += sa-jdi.jar
+  endif
 
   ifeq ($(OPENJDK_TARGET_OS), windows)
     NOT_JRE_LIB_FILES += jawt.lib jvm.lib
