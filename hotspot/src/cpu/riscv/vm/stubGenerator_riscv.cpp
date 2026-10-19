@@ -515,19 +515,122 @@ class StubGenerator: public StubCodeGenerator {
   }
 
   // -------------------------------------------------------------
-  // Card Table Post Barrier for OOP Array Copy
+  // Array Write Pre/Post Barriers for OOP Array Copy
+  // [JDK8u RISC-V Port Backport Note]
+  // Combines JDK 8u AArch64 BarrierSet dispatch (G1 SATB + CardTable + CMS StoreStore)
+  // with JDK 19 GA RISC-V register-set preservation and card-marking loop.
   // -------------------------------------------------------------
-  void gen_write_ref_array_post_barrier(Register dst, size_t elem_size) {
+  void gen_write_ref_array_pre_barrier(Register addr, Register count, bool dest_uninitialized, RegSet saved_regs) {
     BarrierSet* bs = Universe::heap()->barrier_set();
-    if (bs->kind() == BarrierSet::CardTableModRef ||
-        bs->kind() == BarrierSet::CardTableExtension) {
-      CardTableModRefBS* ct = (CardTableModRefBS*)bs;
-      assert(sizeof(*ct->byte_map_base) == sizeof(jbyte), "adjust this code");
-      __ movptr(t0, (intptr_t)ct->byte_map_base);
-      __ srli(t1, dst, CardTableModRefBS::card_shift);
-      __ add(t0, t0, t1);
-      __ sb(zr, Address(t0, 0));
+    switch (bs->kind()) {
+#if INCLUDE_ALL_GCS
+      case BarrierSet::G1SATBCT:
+      case BarrierSet::G1SATBCTLogging:
+        if (!dest_uninitialized) {
+          Label done;
+          Address in_progress(xthread, in_bytes(JavaThread::satb_mark_queue_offset() +
+                                               PtrQueue::byte_offset_of_active()));
+          if (in_bytes(PtrQueue::byte_width_of_active()) == 4) {
+            __ lwu(t0, in_progress);
+          } else {
+            assert(in_bytes(PtrQueue::byte_width_of_active()) == 1, "Assumption");
+            __ lbu(t0, in_progress);
+          }
+          __ beqz(t0, done);
+
+          __ push_reg(saved_regs, sp);
+          if (count == c_rarg0) {
+            if (addr == c_rarg1) {
+              __ mv(t0, c_rarg0);
+              __ mv(c_rarg0, c_rarg1);
+              __ mv(c_rarg1, t0);
+            } else {
+              __ mv(c_rarg1, count);
+              __ mv(c_rarg0, addr);
+            }
+          } else {
+            __ mv(c_rarg0, addr);
+            __ mv(c_rarg1, count);
+          }
+          __ call_VM_leaf(CAST_FROM_FN_PTR(address, BarrierSet::static_write_ref_array_pre), 2);
+          __ pop_reg(saved_regs, sp);
+          __ bind(done);
+        }
+        break;
+#endif // INCLUDE_ALL_GCS
+      case BarrierSet::CardTableModRef:
+      case BarrierSet::CardTableExtension:
+      case BarrierSet::ModRef:
+        break;
+      default:
+        ShouldNotReachHere();
     }
+  }
+
+  void gen_write_ref_array_post_barrier(Register start, Register count, Register scratch, RegSet saved_regs) {
+    assert_different_registers(start, count, scratch, t1);
+    Label L_done;
+
+    __ beqz(count, L_done);
+
+    BarrierSet* bs = Universe::heap()->barrier_set();
+    switch (bs->kind()) {
+#if INCLUDE_ALL_GCS
+      case BarrierSet::G1SATBCT:
+      case BarrierSet::G1SATBCTLogging:
+        {
+          __ push_reg(saved_regs, sp);
+          if (count == c_rarg0) {
+            if (start == c_rarg1) {
+              __ mv(t0, c_rarg0);
+              __ mv(c_rarg0, c_rarg1);
+              __ mv(c_rarg1, t0);
+            } else {
+              __ mv(c_rarg1, count);
+              __ mv(c_rarg0, start);
+            }
+          } else {
+            __ mv(c_rarg0, start);
+            __ mv(c_rarg1, count);
+          }
+          __ call_VM_leaf(CAST_FROM_FN_PTR(address, BarrierSet::static_write_ref_array_post), 2);
+          __ pop_reg(saved_regs, sp);
+        }
+        break;
+#endif // INCLUDE_ALL_GCS
+      case BarrierSet::CardTableModRef:
+      case BarrierSet::CardTableExtension:
+        {
+          Label L_loop;
+          const Register end = t1;
+
+          // end = start + (count << LogBytesPerHeapOop) - BytesPerHeapOop
+          __ slli(end, count, LogBytesPerHeapOop);
+          __ add(end, start, end);
+          __ subi(end, end, BytesPerHeapOop);
+
+          __ srli(start, start, CardTableModRefBS::card_shift);
+          __ srli(end, end, CardTableModRefBS::card_shift);
+          __ sub(count, end, start); // number of cards - 1
+
+          __ load_byte_map_base(scratch);
+          __ add(start, start, scratch);
+          if (UseConcMarkSweepGC) {
+            __ membar(MacroAssembler::StoreStore);
+          }
+          __ bind(L_loop);
+          __ add(scratch, start, count);
+          __ sb(zr, Address(scratch, 0));
+          __ subi(count, count, 1);
+          __ bgez(count, L_loop);
+        }
+        break;
+      case BarrierSet::ModRef:
+        break;
+      default:
+        ShouldNotReachHere();
+    }
+    __ bind(L_done);
   }
 
   // -------------------------------------------------------------
@@ -545,6 +648,11 @@ class StubGenerator: public StubCodeGenerator {
     Register d   = c_rarg1;
     Register cnt = c_rarg2;
     Register tmp = t0;
+
+    if (is_oop) {
+      gen_write_ref_array_pre_barrier(d, cnt, false, RegSet::of(s, d, cnt, ra));
+      __ push_reg(RegSet::of(d, cnt, ra), sp);
+    }
 
     Label loop;
     __ bind(loop);
@@ -572,7 +680,8 @@ class StubGenerator: public StubCodeGenerator {
     __ bgtz(cnt, loop);
 
     if (is_oop) {
-      gen_write_ref_array_post_barrier(c_rarg1, elem_size);
+      __ pop_reg(RegSet::of(d, cnt, ra), sp);
+      gen_write_ref_array_post_barrier(d, cnt, t0, RegSet::of(ra));
     }
 
     __ bind(done);
@@ -590,13 +699,18 @@ class StubGenerator: public StubCodeGenerator {
     address start = __ pc();
     if (entry != NULL) *entry = start;
 
-    Label done;
+    Label done, copy_done;
     __ beqz(c_rarg2, done);
 
     Register s   = c_rarg0;
     Register d   = c_rarg1;
     Register cnt = c_rarg2;
     Register tmp = t0;
+
+    if (is_oop) {
+      gen_write_ref_array_pre_barrier(d, cnt, false, RegSet::of(s, d, cnt, ra));
+      __ push_reg(RegSet::of(d, cnt, ra), sp);
+    }
 
     Label copy_backwards;
     __ bltu(s, d, copy_backwards);
@@ -626,7 +740,7 @@ class StubGenerator: public StubCodeGenerator {
     __ addi(d, d, elem_size);
     __ addi(cnt, cnt, -1);
     __ bgtz(cnt, loop_fwd);
-    __ j(done);
+    __ j(copy_done);
 
     // Backward copy loop
     __ bind(copy_backwards);
@@ -666,10 +780,13 @@ class StubGenerator: public StubCodeGenerator {
     __ addi(cnt, cnt, -1);
     __ bgtz(cnt, loop_bwd);
 
-    __ bind(done);
+    __ bind(copy_done);
     if (is_oop) {
-      gen_write_ref_array_post_barrier(c_rarg1, elem_size);
+      __ pop_reg(RegSet::of(d, cnt, ra), sp);
+      gen_write_ref_array_post_barrier(d, cnt, t0, RegSet::of(ra));
     }
+
+    __ bind(done);
     __ mv(a0, zr);
     __ ret();
     return start;

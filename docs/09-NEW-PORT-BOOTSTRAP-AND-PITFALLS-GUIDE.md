@@ -1234,6 +1234,189 @@ bnez(x13, no_unlock);
 
 ---
 
+### 4.24 G1 写屏障（SATB Pre-Barrier / Card-Marking Post-Barrier）中的 `t0` 寄存器别名冲突与 16 字节对齐栈保护
+
+#### 1. 问题现象
+在开启 `-XX:+UseG1GC` 运行解释器时，执行 `putfield` / `putstatic` / `aastore` 字节码会触发莫名其妙的 `NullPointerException`、对象引用损坏（bad oop），或在慢速路径调用 `SharedRuntime::g1_wb_pre` / `g1_wb_post` 时违反 RISC-V psABI 16 字节栈对齐约束。
+
+#### 2. 根因深度剖析
+1. **`t0` 内部临时寄存器与调用者入参 `tmp` 发生别名冲突**：
+   - 在 [`TemplateTable::do_oop_store`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateTable_riscv.cpp#L138-L155) 中，最初调用 `g1_write_barrier_pre` 时传入了 `t0`（`x5`）作为 `tmp` 参数：
+     ```cpp
+     __ g1_write_barrier_pre(obj, noreg /* pre_val */, xthread, t0 /* tmp */, true, false);
+     ```
+   - 而在 `MacroAssembler::g1_write_barrier_pre` 和 `g1_write_barrier_post` 内部，不仅使用 `t0` 读取线程局部 SATB 队列激活状态（`JavaThread::satb_mark_queue_offset()`），而且所有的远偏移 `ld/sd` 与 `movptr` 宏指令默认也会隐式借用 `t0` 作为基底计算寄存器！一旦 `tmp == t0` 或 `pre_val == t0`，刚加载出来的 `pre_val` 或 `queue_index` 立即被下一条宏指令覆写！
+2. **慢速路径 `push_reg(RegSet, sp)` 的 C 栈对齐陷阱**：
+   - 当 SATB 缓冲区或 Dirty Card 队列满时，屏障慢路径通过 `call_VM_leaf` 调用 C++ 函数 `SharedRuntime::g1_wb_pre` / `g1_wb_post`。在进入 C 函数前需要将存活寄存器压入物理 C 栈 `sp`。
+   - 如果压入的寄存器个数为奇数（例如 `g1_write_barrier_post` 仅需保存 `store_addr` 1 个寄存器，或 `g1_write_barrier_pre` 保存 `obj`、`pre_val`、`x10` 共 3 个寄存器），朴素的 `sp -= count * 8` 会破坏 RISC-V psABI 要求的 **16 字节栈对齐**（`sp % 16 == 0`）。
+
+#### 3. 完美解决方案
+1. 在 [`MacroAssembler::g1_write_barrier_pre`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L788-L858) 与 [`g1_write_barrier_post`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L860-L932) 入口处增加严格的 `assert_different_registers(..., t0)` 断言，并在 [`TemplateTable::do_oop_store`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateTable_riscv.cpp#L138-L155) 中改传 `t1` 作为 `tmp`，传入 `x13` 作为 `tmp2`；
+2. 实现 [`MacroAssembler::push_reg(unsigned int bitset, Register stack)`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L325-L361) 与 `pop_reg`：当 `bitset` 中寄存器数量 `count` 为奇数时，自动预留一个额外的 `wordSize`（`offset = is_even(count) ? 0 : wordSize`），始终保证 `sp` 按 16 字节对齐。
+
+---
+
+### 4.25 `MacroAssembler::load_byte_map_base` 中的 `BarrierSet` 继承体系断言陷阱（`kind()` vs `is_a()`）
+
+#### 1. 问题现象
+在 `-XX:+UseG1GC` 下启动 JVM 时，立即触发断言崩溃：
+```text
+# Internal Error (macroAssembler_riscv.cpp:570), pid=7, tid=19
+# assert(bs->kind() == BarrierSet::CardTableModRef || bs->kind() == BarrierSet::CardTableExtension) failed: wrong barrier set kind
+```
+
+#### 2. 根因深度剖析
+在 JDK 8u 的 `BarrierSet` 类层次结构中：
+```
+BarrierSet
+  └── ModRefBarrierSet
+        └── CardTableModRefBS          (kind() == BarrierSet::CardTableModRef)
+              ├── CardTableExtension   (kind() == BarrierSet::CardTableExtension, ParallelGC 使用)
+              └── G1SATBCardTableModRefBS
+                    └── G1SATBCardTableLoggingModRefBS (kind() == BarrierSet::G1SATBCTLogging, G1GC 使用)
+```
+- SerialGC 与 CMS 使用的 `CardTableModRefBS` 其 `kind()` 为 `BarrierSet::CardTableModRef`；
+- ParallelGC 使用的 `CardTableExtension` 其 `kind()` 为 `BarrierSet::CardTableExtension`；
+- 而 **G1GC** 使用的 `G1SATBCardTableLoggingModRefBS` 虽然继承自 `CardTableModRefBS`（拥有完全合法的 `byte_map_base` 卡表基址），但它的 `bs->kind()` 返回的是 `BarrierSet::G1SATBCTLogging`！
+- 如果在 `load_byte_map_base` 中使用 `bs->kind() == ...` 枚举值硬比较，G1GC 必然触发断言失败。
+
+#### 3. 完美解决方案
+对齐 AArch64 端口（[`macroAssembler_aarch64.cpp:3496`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp#L3496)），将 [`MacroAssembler::load_byte_map_base`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L570) 中的断言修正为多态类型检查：
+```cpp
+assert(bs->is_a(BarrierSet::CardTableModRef), "Resizeable card table is not supported");
+```
+`is_a(BarrierSet::CardTableModRef)` 对 `CardTableModRefBS` 的所有子类（包括 Serial、Parallel、CMS、G1）均返回 `true`。
+
+---
+
+### 4.26 引用数组拷贝桩（`generate_oop_copy`）的写屏障缺失与目的地址/计数寄存器破坏
+
+#### 1. 问题现象
+在实现 [`StubGenerator::generate_oop_copy`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/stubGenerator_riscv.cpp#L620-L695)（用于 `System.arraycopy` 拷贝引用数组 `Object[]`）时，若缺失 `gen_write_ref_array_pre_barrier` / `gen_write_ref_array_post_barrier`，或在拷贝循环中直接递增了目标指针 `d`（`c_rarg1`）并递减了长度 `count`（`c_rarg2`），会导致 G1GC / CMS 在并发标记或年轻代回收时漏标跨代引用或 SATB 原值！
+
+#### 2. 根因深度剖析
+引用数组批量拷贝需要遵循严格的“三段式”契约：
+1. **拷贝前（Pre-Barrier）**：调用 `gen_write_ref_array_pre_barrier(d, count, dest_uninitialized)`。对于 G1GC（且 `!dest_uninitialized`），在覆写目标区间 `[d, d + count * heapOopSize)` 之前，调用 `BarrierSet::static_write_ref_array_pre(d, count)` 将目标数组将被覆写的旧引用记录到 SATB 缓冲区；
+2. **核心拷贝循环**：支持正向与反向（处理重叠区间 `s < d < s + count`）复制；
+3. **拷贝后（Post-Barrier）**：调用 `gen_write_ref_array_post_barrier(d, count, tmp)`，将修改过的目标区间对应的卡表项（Card Table）批量标脏（对于 G1GC 调用 `BarrierSet::static_write_ref_array_post(d, count)`，对于其他分代 GC 在汇编中直接计算 `[start >> 9, end >> 9]` 循环写入 `0`）。
+- **致命陷阱**：如果在第 2 步的核心拷贝循环中，直接修改了寄存器 `d`（`c_rarg1`）和 `count`（`c_rarg2`），当循环结束进入第 3 步 `gen_write_ref_array_post_barrier(d, count, t0)` 时，`count` 已经变成 `0`！后置写屏障直接退化为空操作（No-op）！
+
+#### 3. 完美解决方案
+在 [`StubGenerator::generate_oop_copy`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/stubGenerator_riscv.cpp#L635-L692) 中：
+- 先在入口调用 `gen_write_ref_array_pre_barrier(d, cnt, dest_uninitialized)`；
+- 在拷贝循环中使用临时工作寄存器 `t0`（拷贝 `s`）、`t1`（拷贝 `d`）、`x13`（拷贝 `cnt`）执行循环迭代，**完整保留 `d`（`c_rarg1`）和 `cnt`（`c_rarg2`）的原始起始地址与元素个数**；
+- 循环结束后，将完好无损的 `(d, cnt)` 传给 `gen_write_ref_array_post_barrier(d, cnt, t0)`。
+
+---
+
+### 4.27 JNI Native 方法出口（`generate_native_entry`）误调 `remove_activation` 导致的 `synchronized native` 双重解锁崩溃
+
+#### 1. 问题现象
+当执行任何 `synchronized native` 方法（或 JNI 返回后检查异常/Safepoint）时，虚拟机抛出莫名其妙的 `java.lang.IllegalMonitorStateException`！
+
+#### 2. 根因深度剖析
+在 [`InterpreterGenerator::generate_native_entry`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateInterpreter_riscv.cpp#L830-L888) 中，Native 方法的退出路径与普通 Java 字节码方法（`generate_normal_entry`）有着本质区别：
+1. 在 Native 方法从 C 函数返回并切回 `_thread_in_Java` 状态后：
+   - 第 852~868 行已经显式包含了一段针对 `if (synchronized)` 的解锁逻辑：
+     ```cpp
+     if (synchronized) {
+       ...
+       __ unlock_object(c_rarg1);
+     }
+     ```
+2. 然而，在调用完 `result_handler` 之后（第 882 行），最初的桩代码错误地调用了：
+   ```cpp
+   __ remove_activation(vtos);
+   ```
+   而 `InterpreterMacroAssembler::remove_activation` 内部会检查当前 `Method::access_flags()` 是否包含 `JVM_ACC_SYNCHRONIZED`；一旦发现是同步方法，它会再次去读取第一个 `BasicObjectLock` 槽位。此时该槽位的 `obj` 字段已经在第 867 行的 `unlock_object` 中被清零（`sd(zr, obj_offset)`），于是 `remove_activation` 判定“锁被提前非法释放”，立刻调用 `InterpreterRuntime::throw_illegal_monitor_state_exception`！
+3. 此外，在 Native 调用刚返回、检查 `pending_exception` 时，由于 C 函数调用早已破坏了 caller-saved 的 `xmethod`（`x31/t6`），且 `generate_fixed_frame(true)` 将 native 帧的 `xbcp` 初始化为 `0`（`NULL`），若直接调用 `InterpreterMacroAssembler::call_VM`（其内部会执行 `save_bcp()` 并将 `last_Java_sp` 设为未更新的 `esp`），会在栈回溯时引发 `bcp` 非法指针崩溃。
+
+#### 3. 完美解决方案
+严格对齐 AArch64 端口（[`templateInterpreter_aarch64.cpp:1140-1215`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/templateInterpreter_aarch64.cpp#L1140-L1215)）：
+1. 在 Native 状态转换（`_thread_in_native_trans` -> `_thread_in_Java`）慢路径中，除检查 `SafepointSynchronize::_state` 外，一并检查 `JavaThread::suspend_flags_offset() != 0`，并使用手工对齐栈帧 + `jalr` 调用 `JavaThread::check_special_condition_for_native_trans`；
+2. 在检查 `pending_exception` 前，先通过 `__ get_method(xmethod)` 恢复 `xmethod`，并将 `xbcp` 恢复为 `ConstMethod::codes_offset()`（合法的 `bci == 0`），且使用 `__ MacroAssembler::call_VM`（以 `sp` 而非 `esp` 作为 `last_Java_sp`）抛出异常；
+3. 在 `result_handler` 执行完毕后，**严禁调用 `remove_activation(vtos)`**，而是直接执行退栈指令序列：
+   ```cpp
+   __ ld(esp, Address(fp, frame::interpreter_frame_sender_sp_offset * wordSize));
+   __ leave();
+   __ andi(sp, esp, -16);
+   __ ret();
+   ```
+
+---
+
+### 4.28 栈帧回溯（`frame::sender_for_compiled_frame`）与 Runtime Stub `OopMap` 的“四重连环坑”
+
+#### 1. 问题现象
+当程序触发全局 Safepoint（如 `System.gc()` 或偏向锁撤销 `VM_RevokeBias`），Java 线程在解释器或 Runtime Stub（如 `SafepointBlob`）中阻塞，VMThread 调用 `JavaThread::oops_do` 遍历线程栈时，触发致命段错误（SIGSEGV）或断言失败：
+```text
+# Internal Error (frame.cpp:400), pid=7, tid=19
+# assert(cb == _cb) failed: must be
+```
+或者在 `OopMapSet::oops_do` 中读取到非法的 `OopMap` 偏移而崩溃！
+
+#### 2. 根因深度剖析（四重连环 Bug）
+这是整个 Runtime 基座中最隐蔽、涉及多组件协同的四重底层陷阱：
+1. **陷阱一：`frame_riscv.cpp` 照抄 AArch64 `sender_sp_offset` 导致读取错误的 `saved_fp`**：
+   - 在 AArch64 中，`fp` 指向栈帧底部的 `saved_fp`（即 `link_offset == 0`，`return_addr_offset == 1`，`sender_sp_offset == 2`）。因此在 AArch64 中，`sender_sp - frame::sender_sp_offset` 恰好等于 `sender_sp - 2`（即 `saved_fp` 的地址）。
+   - 但在 **RISC-V** 中，遵循 GCC/Clang 标准栈帧约定，`fp` 指向调用者的栈顶（即 **`sender_sp_offset == 0`**，`return_addr_offset == -1`，**`link_offset == -2`**）！
+   - 此前 [`frame_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/frame_riscv.cpp) 的 `safe_for_sender`（第 118 行）和 `sender_for_compiled_frame`（第 308 行）直接从 AArch64 抄写了：
+     ```cpp
+     intptr_t** saved_fp_addr = (intptr_t**) (sender_sp - frame::sender_sp_offset); // Bug! 在 RISC-V 上等于 sender_sp - 0!
+     ```
+     导致从 `SafepointBlob`（其走的是 `sender_for_compiled_frame`！）向上回溯到调用者解释器帧时，读出的 `saved_fp` 不是 `[sender_sp - 2]` 处的旧 `fp`，而是 `[sender_sp + 0]` 处的栈顶垃圾数据！
+2. **陷阱二：`RegisterSaver::save_live_registers` 中 `OopMap` 栈槽单位混淆（`wordSize` vs `BytesPerInt`）**：
+   - 在 HotSpot 中，无论 32 位还是 64 位架构，`OopMap` 构造函数的 `frame_size` 参数以及 `VMRegImpl::stack2reg(idx)` 的偏移单位，**永远是 4 字节的编译器栈槽（`VMRegImpl::stack_slot_size == 4 == BytesPerInt`）**，而不是 8 字节机器字（`wordSize`）！
+   - 此前 [`sharedRuntime_riscv.cpp:74`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp#L74) 将 `OopMap` 大小写成了 `frame_words`（少乘了 2），且将寄存器在栈上的偏移写成了 `VMRegImpl::stack2reg(i)`（应为 `VMRegImpl::stack2reg(2 * (i - 1))`），导致 `CodeBlob` 的 `_frame_size` 只有实际栈帧的一半，且 `OopMap` 记录的栈偏移全部错位！
+3. **陷阱三：`RegisterSaver` 将固定寄存器 `xthread` / `xheapbase` 与自身跳板 `t0` 记入 `OopMap`**：
+   - `xthread`（`x23`）和 `xheapbase`（`x27`）是全局固定寄存器，`t0`（`x5`）是跳转到 `SafepointBlob` 时被覆盖的跳板寄存器，它们绝不能作为可重定位/可被 GC 扫描的普通寄存器写入 `OopMap`。
+4. **陷阱四：`generate_handler_blob` 调用 `set_last_Java_frame` 时传入 `NULL` 作为 `last_Java_pc`**：
+   - 在 [`SharedRuntime::generate_handler_blob`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp#L343-L358) 中，生成完 `call_VM_leaf` 后，通过 `oop_maps->add_gc_map(__ offset() - start, map)` 将 `OopMap` 绑定在 `call_VM_leaf` 返回点 `retaddr` 的 PC 偏移上。
+   - 但调用前却写成了 `__ set_last_Java_frame(sp, noreg, NULL, t0)`（传入了 `NULL` PC！）。当 VMThread 在 Safepoint 扫描该线程栈时，`frame::pc()` 找不到匹配的 `OopMap` PC 偏移，立即在 `OopMapSet::find_map_at_offset` 中触发致命断言！
+
+#### 3. 完美解决方案
+1. 在 [`frame_riscv.cpp:118`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/frame_riscv.cpp#L118) 与 [`frame_riscv.cpp:308`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/frame_riscv.cpp#L308) 中，将 `saved_fp_addr` 修正为 `sender_sp + frame::link_offset`（即 `sender_sp - 2`），将返回地址修正为 `sender_sp + frame::return_addr_offset`（即 `sender_sp - 1`）；
+2. 在 [`sharedRuntime_riscv.cpp:72-108`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp#L72-L108) 中，将 `OopMap` 槽位数修正为 `frame_words * wordSize / BytesPerInt`，将第 `i` 个通用寄存器的栈槽偏移修正为 `VMRegImpl::stack2reg(2 * (i - 1))`，并跳过 `xthread`、`xheapbase`、`t0`；
+3. 在 [`sharedRuntime_riscv.cpp:343-358`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp#L343-L358)（以及 `generate_deopt_blob`、`generate_uncommon_trap_blob`）中，绑定 `Label retaddr` 并传入 `__ set_last_Java_frame(sp, noreg, retaddr, t0)` 与 `__ call_VM_leaf_base(..., &retaddr)`，使 `last_Java_pc` 与 `add_gc_map(retaddr.offset() - start, map)` 精确对齐到同一个指令字节！
+
+---
+
+### 4.29 偏向锁（Biased Locking）延迟激活（4 秒）掩盖的 `ObjectSynchronizer::fast_exit` 致命断言崩溃
+
+#### 1. 问题现象
+短时间运行的程序（`< 4 秒`）在默认参数下通过了 `synchronized` 测试，但一旦运行超过 4 秒或加上 `-XX:BiasedLockingStartupDelay=0`，在退出第一个 `synchronized` 方法或 `monitorexit` 字节码时立即触发致命断言崩溃：
+```text
+# Internal Error (/workspace/hotspot/src/share/vm/runtime/synchronizer.cpp:187), pid=7, tid=2
+# assert(!object->mark()->has_bias_pattern()) failed: should not see bias pattern here
+# V [libjvm.so+0x7d360c] ObjectSynchronizer::fast_exit(oopDesc*, BasicLock*, Thread*)+0x6e
+# V [libjvm.so+0x7d3962] ObjectSynchronizer::slow_exit(oopDesc*, BasicLock*, Thread*)+0x30
+# V [libjvm.so+0x53d608] InterpreterRuntime::monitorexit(JavaThread*, BasicObjectLock*)+0x96
+```
+
+#### 2. 根因深度剖析
+这是“三位一体”移植范式中 **JDK 8 与 JDK 19 架构差异**最典型、最隐蔽的经典案例：
+1. **为什么短程序不崩、长程序或 `-XX:BiasedLockingStartupDelay=0` 必崩？**
+   - 在 JDK 8u 中，`UseBiasedLocking` 默认是 `true`，但有一个默认 4000ms 的启动延迟（`BiasedLockingStartupDelay = 4000`）。在 JVM 启动的前 4 秒内，分配的对象其 Mark Word 是无锁状态（`0b001`），不会启用偏向模式。
+   - 一旦超过 4 秒（或显式设置 `-XX:BiasedLockingStartupDelay=0`），新分配对象的 Prototype Header 开启偏向模式（低 3 位为 `0b101`，`has_bias_pattern() == true`）。
+2. **为什么 `InterpreterMacroAssembler::unlock_object` 不能直接调用 `InterpreterRuntime::monitorexit`？**
+   - 当调用 `InterpreterRuntime::monitorenter` 时，C++ 层的 `ObjectSynchronizer::fast_enter` 会检查 `UseBiasedLocking` 并调用 `BiasedLocking::revoke_and_rebias`，将对象头偏向当前线程（Mark Word 低 3 位保持 `0b101`）。
+   - 然而，在解锁路径上，HotSpot 的设计契约规定：**偏向锁的解锁是一个纯汇编层的空操作（No-op，仅需检查对象头低 3 位是否为 `0b101` 并清空 `BasicObjectLock::_obj`），绝不允许进入 C++ 慢路径 `InterpreterRuntime::monitorexit` -> `ObjectSynchronizer::slow_exit` -> `ObjectSynchronizer::fast_exit`！**
+   - 因为 `ObjectSynchronizer::fast_exit`（[`synchronizer.cpp:187`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/runtime/synchronizer.cpp#L187)）的第一行就是：
+     ```cpp
+     assert(!object->mark()->has_bias_pattern(), "should not see bias pattern here");
+     ```
+3. **为什么只看 JDK 19 RISC-V 代码会掉坑？**
+   - 在 JDK 15（JEP 374）之后，偏向锁被废弃并最终从 JDK 19 中彻底移除，因此 `/Users/wujiahua/code/jdk19` 的 `macroAssembler_riscv.cpp` 和 `interp_masm_riscv.cpp` 中完全没有 `biased_locking_enter` / `biased_locking_exit`！
+   - 更进一步，JDK 19 将 `InterpreterRuntime::monitorexit` 改为了 `JRT_LEAF`（用 `call_VM_leaf` 调用且直接传 `BasicObjectLock*` 到 `c_rarg0`），而 JDK 8u 中 `InterpreterRuntime::monitorexit` 是 `IRT_ENTRY_NO_ASYNC`（第一个参数必须是 `JavaThread*`，必须用 `call_VM` 调用）！
+
+#### 3. 完美解决方案
+遵循“三位一体”移植范式，结合 JDK 8u AArch64 的偏向锁状态机（[`macroAssembler_aarch64.cpp:402-576`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp#L402-L576)、[`interp_masm_aarch64.cpp:644-794`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/interp_masm_aarch64.cpp#L644-L794)）与 JDK 19 RISC-V 的原子 `lr.d/sc.d` 指令（[`macroAssembler_riscv.cpp:1245-1370`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L1245-L1370)、[`interp_masm_riscv.cpp:356-468`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interp_masm_riscv.cpp#L356-L468)）：
+1. 在 `MacroAssembler` 中基于 `lr.d.aqrl` + `sc.d.rl` 实现 `cmpxchgptr` 与 `cmpxchg_obj_header`；
+2. 完整实现 `MacroAssembler::biased_locking_enter`（支持匿名偏向 CAS、跨 Epoch 重偏向 CAS、Prototype 撤销 CAS 回退）与 `MacroAssembler::biased_locking_exit`（检测 `mark & 7 == 5` 直接跳转 `done`）；
+3. 在 `InterpreterMacroAssembler::lock_object` 与 `unlock_object` 中集成偏向锁快路径、轻量级栈锁 CAS 快路径、同页栈指针递归锁检测（`((mark - sp) & (7 - os::vm_page_size())) == 0`）以及 `call_VM` 慢路径回退。
+
+---
+
 ## 五、新架构移植工程化核对清单（Step-by-Step Checklist）
 
 如果未来要在 OpenJDK 8u 中移植另一个全新的指令集架构（如某个专有 ASIC、DSP 或新一代开放架构），可直接按照本工程总结的核对清单推进 Phase 1：

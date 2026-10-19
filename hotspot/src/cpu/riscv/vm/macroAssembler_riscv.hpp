@@ -30,6 +30,7 @@
 #include "asm/assembler.inline.hpp"
 
 class Method;
+class BiasedLockingCounters;
 
 class MacroAssembler: public Assembler {
  public:
@@ -101,6 +102,11 @@ class MacroAssembler: public Assembler {
   void pop(FloatRegister r);
   void push_reg(Register r);
   void pop_reg(Register r);
+  int  bitset_to_regs(unsigned int bitset, unsigned char* regs);
+  int  push_reg(unsigned int bitset, Register stack);
+  int  pop_reg(unsigned int bitset, Register stack);
+  void push_reg(RegSet regs, Register stack) { if (regs.bits()) { push_reg(regs.bits(), stack); } }
+  void pop_reg(RegSet regs, Register stack) { if (regs.bits()) { pop_reg(regs.bits(), stack); } }
   void enter();
   void leave();
 
@@ -222,6 +228,19 @@ class MacroAssembler: public Assembler {
   void load_klass(Register dst, Register src);
   void store_klass(Register dst, Register src);
   void store_klass_gap(Register dst, Register src);
+  void load_prototype_header(Register dst, Register src);
+
+  // Atomic CAS and Biased Locking support (JDK 8u architecture + RISC-V LR/SC)
+  void cmpxchgptr(Register oldv, Register newv, Register addr, Register tmp,
+                  Label &succeed, Label *fail);
+  void cmpxchg_obj_header(Register oldv, Register newv, Register obj, Register tmp,
+                          Label &succeed, Label *fail);
+  int biased_locking_enter(Register lock_reg, Register obj_reg,
+                           Register swap_reg, Register tmp_reg,
+                           bool swap_reg_contains_mark,
+                           Label& done, Label* slow_case = NULL,
+                           BiasedLockingCounters* counters = NULL);
+  void biased_locking_exit(Register obj_reg, Register temp_reg, Label& done);
 
   // Subtype check
   void check_klass_subtype(Register sub_klass,

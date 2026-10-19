@@ -12,9 +12,9 @@
 | :--- | :--- | :---: | :--- | :--- |
 | **Phase 0** | 构建系统与 Docker 交叉编译闭环 | **`[x] 100% 已完成`** | 容器环境、三级网络路由、Autoconf/Makefiles | 生成 Makefile，精准进入源码依赖 |
 | **Phase 1** | 底层汇编器、寄存器与 OS/CPU 粘合 | **`[x] 100% 已完成`** | RV64GC 指令发射、寄存器系统、AMO/OrderAccess、Linux 信号 | `./docker/make.sh hotspot` 编译通过汇编与 OS 层 |
-| **Phase 2** | 模板解释器与运行时 Stubs 跑通 | **`[x] 100% 已完成`** | 200+ 字节码模板、栈帧模型、call_stub、全局安全点 | `-Xint -version` 成功执行并打印 Hello World |
-| **Phase 3** | C1 客户端编译器与 Parallel/Serial GC | `[ ] 待开始` | C1 线性扫描寄存器分配、LIR 汇编、PS 卡表写屏障 | 开启 `-XX:TieredStopAtLevel=1` 稳定运行大对象分配 |
-| **Phase 4** | CMS 与 G1 垃圾回收器写屏障集成 | `[ ] 待开始` | CMS store-check 屏障、G1 SATB 预写屏障、跨 Region 脏卡队列 | 跑通 `jtreg:gc/g1` 与 `gc/cms` 并发标记测试 |
+| **Phase 2** | 模板解释器、锁机制、GC 屏障与 Safepoint 基座加固 | **`[x] 100% 已完成`** | 200+ 字节码模板、偏向锁/轻量级锁、四大 GC 解释器屏障、全局安全点与栈回溯 | `-Xint` 下四大 GC 跑通 `ComprehensiveTest` 与 RISC-V `javac` 自举编译 |
+| **Phase 3** | C1 客户端编译器与 C1 级 GC 屏障 | `[ ] 进行中` | C1 线性扫描寄存器分配、LIR 汇编、C1 GC 写屏障与 Runtime1 桩 | 开启 `-XX:TieredStopAtLevel=1` 稳定运行大对象分配 |
+| **Phase 4** | CMS 与 G1 垃圾回收器写屏障集成 | **`[x] 解释器/Stubs 已完成`** | CMS store-check 屏障、G1 SATB 预写屏障、跨 Region 脏卡队列 | 解释器与 `oop_arraycopy` 已 100% 跑通四大 GC，待合入 C1/C2 屏障 |
 | **Phase 5** | C2 服务端编译器与 riscv64.ad 架构定义 | `[ ] 待开始` | 适配 JDK 8 ADLC 的 riscv64.ad、指令匹配、分层编译 | 成功开启 `-XX:+TieredCompilation` 稳定冷启动 Spring Boot |
 | **Phase 6** | 现代硬件扩展加速与全套测试加固 | `[ ] 待开始` | RVC 4 字节对齐保护、Zba/Zbb 位操作、RVV 1.0 矢量化 | jtreg 核心通过率 $\ge 99\%$，SPECjvm2008 平稳 |
 
@@ -253,6 +253,35 @@
   - [x] 在 QEMU 下成功执行 `./docker/qemu-java.sh -Xint -version`（100% 成功输出版本号并以 0 退出）；
   - [x] 成功执行 `./docker/qemu-java.sh -Xint Hello` 并正确打印 `Hello, RISC-V OpenJDK 8u!`；
   - [x] 成功执行多场景压力单测 `ComprehensiveTest`（包含算术递归、嵌套 Synchronized、异常捕获展开、HashMap 集合遍历），全部 PASS！
+
+### 【Sprint Card 2.6】底层运行时基座全方位加固（Safepoint / OopMap / 四大 GC 屏障 / 偏向锁与快速栈锁）
+* **责任模块**：`hotspot/src/cpu/riscv/vm/`
+* **状态**：`[x] 已完成`
+* **对应源码**：
+  * [`hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/interp_masm_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interp_masm_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/frame_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/frame_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/stubGenerator_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/stubGenerator_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/templateInterpreter_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateInterpreter_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/templateTable_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateTable_riscv.cpp)
+* **核心验收 Checklist**：
+  - [x] **G1GC / CMS / Parallel / Serial 四大 GC 写屏障完备化**：
+    - 重构 `g1_write_barrier_pre` 与 `g1_write_barrier_post`，消除 `t0` 寄存器别名冲突，实现 16 字节对齐的 `push_reg(RegSet, sp)` / `pop_reg(RegSet, sp)`；
+    - 修正 `load_byte_map_base` 中的 `bs->is_a(BarrierSet::CardTableModRef)` 多态类型断言；
+    - 在 `stubGenerator_riscv.cpp` 中完整实现 `gen_write_ref_array_pre_barrier` 与 `gen_write_ref_array_post_barrier`，修复 `generate_oop_copy` 寄存器存活问题；
+  - [x] **全局 Safepoint 与编译帧/Stub 帧栈回溯修复**：
+    - 修复 `frame::safe_for_sender` 与 `frame::sender_for_compiled_frame` 中 `saved_fp` 偏移（`sender_sp + frame::link_offset`）；
+    - 修复 `RegisterSaver::save_live_registers` 中 `OopMap` 4 字节栈槽（`BytesPerInt`）单位计算与 `generate_handler_blob` 的 `retaddr` PC 绑定；
+  - [x] **偏向锁（Biased Locking）与轻量级栈锁（Fast Stack Locking）汇编快路径**：
+    - 实现 `cmpxchgptr`、`cmpxchg_obj_header`、`load_prototype_header`、`biased_locking_enter` 与 `biased_locking_exit`；
+    - 实现 `InterpreterMacroAssembler::lock_object` 与 `unlock_object` 快路径（解决 `BiasedLockingStartupDelay=0` 或运行 >4s 后触发 `ObjectSynchronizer::fast_exit` 致命断言问题）；
+  - [x] **JNI Native 出口加固**：
+    - 修复 `generate_native_entry` 出口处误调 `remove_activation(vtos)` 导致的 `synchronized native` 双重解锁崩溃；
+  - [x] **严苛验证通过**：
+    - 四大 GC（Serial、Parallel、CMS、G1）+ 立即偏向锁（`-XX:BiasedLockingStartupDelay=0`）/ 禁用偏向锁（`-XX:-UseBiasedLocking`）下 100% 跑通多线程竞争、偏向锁撤销 Safepoint、`Object.wait/notify`、`System.gc()`、`WeakReference` 回收；
+    - 成功在 QEMU 下用 RISC-V 自身的 `javac`（`-J-Xint -J-XX:+UseG1GC -J-XX:BiasedLockingStartupDelay=0`）完成 Java 源码自举编译！
 
 ---
 

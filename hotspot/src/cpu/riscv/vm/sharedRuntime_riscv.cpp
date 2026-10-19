@@ -74,7 +74,11 @@ OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int additional_
   frame_words = round_to(frame_words, 2); // 16-byte aligned
   *total_frame_words = frame_words;
 
-  OopMap* map = new OopMap(frame_words, 0);
+  // OopMap frame size and VMRegImpl::stack2reg offsets are in 4-byte compiler stack slots (jint's),
+  // NOT 8-byte words! (1 word = 2 slots).
+  int frame_size_in_slots = frame_words * wordSize / BytesPerInt;
+  int additional_frame_slots = additional_frame_words * wordSize / BytesPerInt;
+  OopMap* map = new OopMap(frame_size_in_slots, 0);
 
   __ addi(sp, sp, -frame_words * wordSize);
   __ sd(ra, Address(sp, (frame_words - 1) * wordSize));
@@ -85,8 +89,11 @@ OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int additional_
   for (int i = 1; i < 32; i++) {
     Register r = as_Register(i);
     if (r != sp && r != fp && r != ra) {
+      int sp_offset_in_slots = 2 * (i - 1);
       __ sd(r, Address(sp, (i - 1) * wordSize));
-      map->set_callee_saved(VMRegImpl::stack2reg(i - 1), r->as_VMReg());
+      if (r != xthread && r != xheapbase && r != t0) {
+        map->set_callee_saved(VMRegImpl::stack2reg(sp_offset_in_slots + additional_frame_slots), r->as_VMReg());
+      }
     }
   }
 
@@ -94,8 +101,9 @@ OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int additional_
   int f_base = 32;
   for (int i = 0; i < 32; i++) {
     FloatRegister f = as_FloatRegister(i);
+    int sp_offset_in_slots = 2 * (f_base + i);
     __ fsd(f, Address(sp, (f_base + i) * wordSize));
-    map->set_callee_saved(VMRegImpl::stack2reg(f_base + i), f->as_VMReg());
+    map->set_callee_saved(VMRegImpl::stack2reg(sp_offset_in_slots + additional_frame_slots), f->as_VMReg());
   }
 
   return map;
@@ -332,18 +340,22 @@ SafepointBlob* SharedRuntime::generate_handler_blob(address call_ptr, int poll_t
 
   OopMap* map = RegisterSaver::save_live_registers(masm, 0, &frame_size_in_words);
 
-  __ set_last_Java_frame(sp, noreg, NULL, t0);
+  Label retaddr;
+  __ set_last_Java_frame(sp, noreg, retaddr, t0);
 
   if (!cause_return) {
     __ ld(c_rarg0, Address(xthread, JavaThread::saved_exception_pc_offset()));
-    __ sd(c_rarg0, Address(fp, -1 * wordSize));
+    __ sd(c_rarg0, Address(fp, frame::return_addr_offset * wordSize));
   }
 
   __ mv(c_rarg0, xthread);
   __ call(call_ptr);
+  __ bind(retaddr);
 
   oop_maps->add_gc_map(__ pc() - start, map);
   __ reset_last_Java_frame(false);
+
+  __ membar(MacroAssembler::LoadLoad | MacroAssembler::LoadStore);
 
   Label noException;
   __ ld(t0, Address(xthread, Thread::pending_exception_offset()));
@@ -446,11 +458,14 @@ void SharedRuntime::generate_deopt_blob() {
 
   __ bind(cont);
 
-  __ set_last_Java_frame(sp, noreg, NULL, t0);
+  Label retaddr1;
+  __ set_last_Java_frame(sp, noreg, retaddr1, t0);
   __ mv(c_rarg0, xthread);
   __ mv(c_rarg1, xcpool);
   __ call(CAST_FROM_FN_PTR(address, Deoptimization::fetch_unroll_info));
+  __ bind(retaddr1);
 
+  oop_maps->add_gc_map(__ pc() - start, map);
   __ reset_last_Java_frame(false);
 
   // UnrollBlock* is returned in x10
@@ -460,17 +475,19 @@ void SharedRuntime::generate_deopt_blob() {
   RegisterSaver::restore_live_registers(masm);
 
   // Call unpack_frames(JavaThread* thread, int exec_mode)
-  __ set_last_Java_frame(sp, noreg, NULL, t0);
+  Label retaddr2;
+  __ set_last_Java_frame(sp, noreg, retaddr2, t0);
   __ mv(c_rarg0, xthread);
   __ mv(c_rarg1, xcpool);
   __ call(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames));
+  __ bind(retaddr2);
   __ reset_last_Java_frame(false);
 
   // Target PC returned in x10
   __ jr(x10);
 
   masm->flush();
-  _deopt_blob = DeoptimizationBlob::create(&buffer, oop_maps, 0, reexecute_offset, exception_offset, 0);
+  _deopt_blob = DeoptimizationBlob::create(&buffer, oop_maps, 0, exception_offset, reexecute_offset, frame_size_in_words);
 }
 
 #ifdef COMPILER2
@@ -480,14 +497,18 @@ void SharedRuntime::generate_uncommon_trap_blob() {
   MacroAssembler* masm = new MacroAssembler(&buffer);
   int frame_size_in_words;
   OopMapSet *oop_maps = new OopMapSet();
+  address start = __ pc();
 
   OopMap* map = RegisterSaver::save_live_registers(masm, 0, &frame_size_in_words);
 
-  __ set_last_Java_frame(sp, noreg, NULL, t0);
+  Label retaddr;
+  __ set_last_Java_frame(sp, noreg, retaddr, t0);
   __ mv(c_rarg0, xthread);
   __ mv(c_rarg1, c_rarg1); // reason passed in c_rarg1
   __ call(CAST_FROM_FN_PTR(address, Deoptimization::uncommon_trap));
+  __ bind(retaddr);
 
+  oop_maps->add_gc_map(__ pc() - start, map);
   __ reset_last_Java_frame(false);
   RegisterSaver::restore_live_registers(masm);
   __ ret();

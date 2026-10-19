@@ -135,7 +135,7 @@ static void do_oop_store(InterpreterMacroAssembler* _masm,
         __ g1_write_barrier_pre(x13 /* obj */,
                                 x11 /* pre_val */,
                                 xthread /* thread */,
-                                t0  /* tmp */,
+                                t1  /* tmp */,
                                 val != noreg /* tosca_live */,
                                 false /* expand_call */);
         if (val == noreg) {
@@ -151,7 +151,7 @@ static void do_oop_store(InterpreterMacroAssembler* _masm,
           __ g1_write_barrier_post(x13 /* store_adr */,
                                    new_val /* new_val */,
                                    xthread /* thread */,
-                                   t0 /* tmp */,
+                                   t2 /* tmp */,
                                    x11 /* tmp2 */);
         }
       }

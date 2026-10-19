@@ -508,7 +508,7 @@ address InterpreterGenerator::generate_Reference_get_entry(void) {
     __ g1_write_barrier_pre(noreg /* obj */,
                             local_0 /* pre_val */,
                             xthread /* thread */,
-                            t0 /* tmp */,
+                            t1 /* tmp */,
                             true /* tosca_live */,
                             true /* expand_call */);
 
@@ -698,31 +698,53 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
   __ push(ltos);
 
   // change thread state to native_trans
+  // Force all preceding writes to be observed prior to thread state change
+  __ membar(MacroAssembler::LoadStore | MacroAssembler::StoreStore);
+
   __ mv(t1, _thread_in_native_trans);
-  __ la(t0, Address(xthread, JavaThread::thread_state_offset()));
-  __ sw(t1, Address(t0, 0));
+  __ sw(t1, Address(xthread, JavaThread::thread_state_offset()));
 
-  __ serialize_memory(xthread, t0);
+  if (os::is_MP()) {
+    if (UseMembar) {
+      // Force this write out before the read below
+      __ membar(MacroAssembler::AnyAny);
+    } else {
+      __ serialize_memory(xthread, t0);
+    }
+  }
 
-  // check for safepoint operation in progress
+  // check for safepoint operation in progress and/or pending suspend requests
+  // [JDK8u RISC-V Port Backport Note]
+  // Aligns with AArch64 JDK 8u global SafepointSynchronize::_state + suspend_flags
+  // check and JDK 19 GA manual jalr call to check_special_condition_for_native_trans.
   {
-    Label Continue;
+    Label L, Continue;
     __ movptr(t0, (intptr_t)SafepointSynchronize::address_of_state());
     __ lwu(t0, Address(t0, 0));
+    assert(SafepointSynchronize::_not_synchronized == 0, "SafepointSynchronize::_not_synchronized");
+    __ bnez(t0, L);
+    __ lwu(t0, Address(xthread, JavaThread::suspend_flags_offset()));
     __ beqz(t0, Continue);
+    __ bind(L);
 
+    // Don't use call_VM as it will see a possible pending exception
+    // and forward it and never return here preventing us from
+    // clearing _last_native_pc down below. Also can't use
+    // call_VM_leaf either as InterpreterMacroAssembler::call_VM_leaf_base
+    // checks last_sp == NULL, which is still non-NULL until reset_last_Java_frame below.
+    // So we do a runtime call by hand.
     __ mv(c_rarg0, xthread);
-    __ call_VM_leaf(CAST_FROM_FN_PTR(address, JavaThread::check_safepoint_and_suspend_for_native_trans), c_rarg0);
+    __ movptr(t1, CAST_FROM_FN_PTR(intptr_t, JavaThread::check_special_condition_for_native_trans));
+    __ jalr(t1);
     __ get_method(xmethod);
     __ reinit_heapbase();
     __ bind(Continue);
   }
 
   // change thread state to _thread_in_Java
+  __ membar(MacroAssembler::LoadStore | MacroAssembler::StoreStore);
   __ mv(t1, _thread_in_Java);
-  __ la(t0, Address(xthread, JavaThread::thread_state_offset()));
-  __ sw(t1, Address(t0, 0));
-  __ membar(MacroAssembler::StoreStore);
+  __ sw(t1, Address(xthread, JavaThread::thread_state_offset()));
 
   __ reset_last_Java_frame(true);
 
@@ -757,7 +779,7 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
       __ g1_write_barrier_pre(noreg /* obj */,
                               x10 /* pre_val */,
                               xthread /* thread */,
-                              t /* tmp */,
+                              t1 /* tmp */,
                               true /* tosca_live */,
                               true /* expand_call */);
 
@@ -792,7 +814,8 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
     __ mv(fp, sp);
 
     __ mv(c_rarg0, xthread);
-    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::reguard_yellow_pages), c_rarg0);
+    __ movptr(t1, CAST_FROM_FN_PTR(intptr_t, SharedRuntime::reguard_yellow_pages));
+    __ jalr(t1);
 
     __ ld(fp, Address(sp, 0));
     __ ld(ra, Address(sp, wordSize));
@@ -801,36 +824,65 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
     __ bind(no_reguard);
   }
 
-  // handle exceptions
+  // The method register is junk from after the thread_in_native transition
+  // until here. Also can't call_VM until the bcp has been
+  // restored. Need bcp for throwing exception below so get it now.
+  __ get_method(xmethod);
+
+  // restore bcp to have legal interpreter frame, i.e., bci == 0 <=>
+  // xbcp == code_base()
+  __ ld(xbcp, Address(xmethod, Method::const_offset()));   // get ConstMethod*
+  __ addi(xbcp, xbcp, in_bytes(ConstMethod::codes_offset())); // get codebase
+
+  // handle exceptions (exception handling will handle unlocking!)
   {
     Label L;
     __ ld(t0, Address(xthread, Thread::pending_exception_offset()));
     __ beqz(t0, L);
-    __ call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::throw_pending_exception));
+    // Use MacroAssembler::call_VM because last_sp is not set as expected by
+    // InterpreterMacroAssembler::call_VM_base at this point.
+    __ MacroAssembler::call_VM(noreg,
+                               CAST_FROM_FN_PTR(address,
+                               InterpreterRuntime::throw_pending_exception));
     __ should_not_reach_here();
     __ bind(L);
   }
 
-  // unlock if synchronized
+  // do unlocking if necessary
   if (synchronized) {
+    Label unlock;
     const Address monitor(fp, (intptr_t)(frame::interpreter_frame_initial_sp_offset *
                                          wordSize - sizeof(BasicObjectLock)));
     __ la(c_rarg1, monitor);
+    __ ld(t, Address(c_rarg1, BasicObjectLock::obj_offset_in_bytes()));
+    __ bnez(t, unlock);
+
+    // Entry already unlocked, need to throw exception
+    __ MacroAssembler::call_VM(noreg,
+                               CAST_FROM_FN_PTR(address,
+                               InterpreterRuntime::throw_illegal_monitor_state_exception));
+    __ should_not_reach_here();
+
+    __ bind(unlock);
     __ unlock_object(c_rarg1);
   }
 
-  // notify jvmt/dtrace exit
+  // notify jvmti/dtrace exit
+  // Note: This must happen _after_ handling/throwing any exceptions since
+  //       the exception handler code notifies the runtime of method exits too.
   __ notify_method_exit(vtos, InterpreterMacroAssembler::NotifyJVMTI);
 
-  // restore result
+  // restore potential result in x10:f10, call result handler
   __ pop(ltos);
   __ pop(dtos);
 
-  // call result handler
   __ ld(t0, Address(fp, frame::interpreter_frame_result_handler_offset * wordSize));
   __ jalr(t0);
 
-  __ remove_activation(vtos);
+  // remove activation directly (do NOT call remove_activation(vtos) which would unlock a second time!)
+  __ ld(esp, Address(fp, frame::interpreter_frame_sender_sp_offset * wordSize));
+  __ leave();
+  __ andi(sp, esp, -16);
   __ ret();
 
   if (inc_counter) {

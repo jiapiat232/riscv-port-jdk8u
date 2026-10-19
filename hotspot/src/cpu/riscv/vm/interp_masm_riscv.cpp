@@ -345,12 +345,126 @@ void InterpreterMacroAssembler::load_resolved_reference_at_index(Register result
   load_heap_oop(result, Address(result, arrayOopDesc::base_offset_in_bytes(T_OBJECT)));
 }
 
+// Lock an object. Used in monitorenter bytecode and lock_method.
+// Combines JDK 8u AArch64 biased locking flow (interp_masm_aarch64.cpp:644-729)
+// with JDK 19 RISC-V fast stack-lock CAS (interp_masm_riscv.cpp:784-847).
+//
+// Args:
+//   c_rarg1 (lock_reg): BasicObjectLock for lock
+// Kills:
+//   x10, c_rarg1 (x11), c_rarg2 (x12), c_rarg3 (x13), t0, t1
 void InterpreterMacroAssembler::lock_object(Register lock_reg) {
-  call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter), lock_reg);
+  assert(lock_reg == c_rarg1, "The argument is only for looks. It must be c_rarg1");
+  if (UseHeavyMonitors) {
+    call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter), lock_reg);
+  } else {
+    Label done;
+
+    const Register swap_reg = x10;
+    const Register tmp      = c_rarg2;
+    const Register obj_reg  = c_rarg3; // Will contain the oop
+
+    const int obj_offset  = BasicObjectLock::obj_offset_in_bytes();
+    const int lock_offset = BasicObjectLock::lock_offset_in_bytes();
+    const int mark_offset = lock_offset + BasicLock::displaced_header_offset_in_bytes();
+
+    Label slow_case;
+
+    // Load object pointer into obj_reg (c_rarg3)
+    ld(obj_reg, Address(lock_reg, obj_offset));
+
+    if (UseBiasedLocking) {
+      biased_locking_enter(lock_reg, obj_reg, swap_reg, tmp, false, done, &slow_case);
+    }
+
+    // Load (object->mark() | 1) into swap_reg
+    ld(t0, Address(obj_reg, oopDesc::mark_offset_in_bytes()));
+    ori(swap_reg, t0, markOopDesc::unlocked_value);
+
+    // Save (object->mark() | 1) into BasicLock's displaced header
+    sd(swap_reg, Address(lock_reg, mark_offset));
+
+    assert(lock_offset == 0, "displaced header must be first word in BasicObjectLock");
+
+    cmpxchg_obj_header(swap_reg, lock_reg, obj_reg, t0, done, /*fallthrough*/NULL);
+
+    // Test if the oopMark is an obvious stack pointer, i.e.,
+    //  1) (mark & 7) == 0, and
+    //  2) sp <= mark < mark + os::pagesize()
+    //
+    // These 3 tests can be done by evaluating the following
+    // expression: ((mark - sp) & (7 - os::vm_page_size())),
+    // assuming both stack pointer and pagesize have their
+    // least significant 3 bits clear.
+    // NOTE: the oopMark is in swap_reg (x10) as the result of cmpxchg_obj_header
+    sub(swap_reg, swap_reg, sp);
+    movptr(t0, (intptr_t)(7 - os::vm_page_size()));
+    andr(swap_reg, swap_reg, t0);
+
+    // Save the test result, for recursive case, the result is zero
+    sd(swap_reg, Address(lock_reg, mark_offset));
+
+    beqz(swap_reg, done);
+
+    bind(slow_case);
+
+    // Call the runtime routine for slow case
+    call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter), lock_reg);
+
+    bind(done);
+  }
 }
 
+// Unlocks an object. Used in monitorexit bytecode and remove_activation.
+// NOTE: Unlike JDK 19 where biased locking is removed and monitorexit is a JRT_LEAF,
+// in JDK 8u UseBiasedLocking is enabled by default (after BiasedLockingStartupDelay=4000ms)
+// and ObjectSynchronizer::fast_exit asserts !object->mark()->has_bias_pattern().
+// Therefore biased_locking_exit MUST intercept biased objects before slow path!
+// Also, in JDK 8u InterpreterRuntime::monitorexit is IRT_ENTRY_NO_ASYNC, so slow path
+// MUST use call_VM (not call_VM_leaf).
 void InterpreterMacroAssembler::unlock_object(Register lock_reg) {
-  call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit), lock_reg);
+  assert(lock_reg == c_rarg1, "The argument is only for looks. It must be c_rarg1");
+  if (UseHeavyMonitors) {
+    call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit), lock_reg);
+  } else {
+    Label done;
+
+    const Register swap_reg   = x10;
+    const Register header_reg = c_rarg2; // Will contain the old oopMark
+    const Register obj_reg    = c_rarg3; // Will contain the oop
+
+    save_bcp(); // Save in case of exception
+
+    // Convert from BasicObjectLock structure to object and BasicLock structure
+    la(swap_reg, Address(lock_reg, BasicObjectLock::lock_offset_in_bytes()));
+
+    // Load oop into obj_reg (c_rarg3)
+    ld(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset_in_bytes()));
+
+    // Free entry
+    sd(zr, Address(lock_reg, BasicObjectLock::obj_offset_in_bytes()));
+
+    if (UseBiasedLocking) {
+      biased_locking_exit(obj_reg, header_reg, done);
+    }
+
+    // Load the old header from BasicLock structure
+    ld(header_reg, Address(swap_reg, BasicLock::displaced_header_offset_in_bytes()));
+
+    // Test for recursion
+    beqz(header_reg, done);
+
+    // Atomic swap back the old header
+    cmpxchg_obj_header(swap_reg, header_reg, obj_reg, t0, done, /*fallthrough*/NULL);
+
+    // Call the runtime routine for slow case.
+    sd(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset_in_bytes())); // restore obj
+    call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit), lock_reg);
+
+    bind(done);
+
+    restore_bcp();
+  }
 }
 
 void InterpreterMacroAssembler::remove_activation(TosState state,

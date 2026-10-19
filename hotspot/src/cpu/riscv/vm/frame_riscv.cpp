@@ -115,8 +115,8 @@ bool frame::safe_for_sender(JavaThread *thread) {
 
       sender_sp = _unextended_sp + _cb->frame_size();
       sender_unextended_sp = sender_sp;
-      sender_pc = (address) *(sender_sp - 1);
-      saved_fp = (intptr_t*) *(sender_sp - frame::sender_sp_offset);
+      sender_pc = (address) *(sender_sp + frame::return_addr_offset);
+      saved_fp = (intptr_t*) *(sender_sp + frame::link_offset);
     }
 
     if (Interpreter::contains(sender_pc)) {
@@ -185,13 +185,23 @@ bool frame::safe_for_sender(JavaThread *thread) {
 }
 
 void frame::patch_pc(Thread* thread, address pc) {
+  assert(_cb == CodeCache::find_blob(pc), "unexpected pc");
   address* pc_addr = &(((address*) sp())[-1]);
   if (TracePcPatching) {
     tty->print_cr("patch_pc at address " INTPTR_FORMAT " [" INTPTR_FORMAT " -> " INTPTR_FORMAT "]",
                   p2i(pc_addr), p2i(*pc_addr), p2i(pc));
   }
+  DEBUG_ONLY(address old_pc = _pc;)
   *pc_addr = pc;
-  _pc = pc;
+  _pc = pc; // must be set before call to get_deopt_original_pc
+  address original_pc = nmethod::get_deopt_original_pc(this);
+  if (original_pc != NULL) {
+    assert(original_pc == old_pc, "expected original PC to be stored before patching");
+    _deopt_state = is_deoptimized;
+    _pc = original_pc;
+  } else {
+    _deopt_state = not_deoptimized;
+  }
 }
 
 bool frame::is_interpreted_frame() const {
@@ -204,7 +214,8 @@ int frame::frame_size(RegisterMap* map) const {
 }
 
 intptr_t* frame::entry_frame_argument_at(int offset) const {
-  return (intptr_t*) &fp()[entry_frame_call_wrapper_offset - 1 - offset];
+  int index = (Interpreter::expr_offset_in_bytes(offset) / wordSize);
+  return &unextended_sp()[index];
 }
 
 #ifndef CC_INTERP
@@ -307,8 +318,10 @@ frame frame::sender_for_compiled_frame(RegisterMap* map) const {
   intptr_t* l_sender_sp = unextended_sp() + _cb->frame_size();
   intptr_t* unextended_sp = l_sender_sp;
 
-  address sender_pc = (address) *(l_sender_sp - 1);
-  intptr_t** saved_fp_addr = (intptr_t**) (l_sender_sp - frame::sender_sp_offset);
+  // On RISC-V, return_addr_offset is -1 (fp[-1]) and link_offset is -2 (fp[-2]),
+  // while sender_sp_offset is 0 (unlike AArch64 where sender_sp_offset is 2).
+  address sender_pc = (address) *(l_sender_sp + frame::return_addr_offset);
+  intptr_t** saved_fp_addr = (intptr_t**) (l_sender_sp + frame::link_offset);
 
   if (map->update_map()) {
     map->set_include_argument_oops(_cb->caller_must_gc_arguments(map->thread()));
