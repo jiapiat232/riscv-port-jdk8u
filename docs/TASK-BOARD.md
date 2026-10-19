@@ -12,7 +12,7 @@
 | :--- | :--- | :---: | :--- | :--- |
 | **Phase 0** | 构建系统与 Docker 交叉编译闭环 | **`[x] 100% 已完成`** | 容器环境、三级网络路由、Autoconf/Makefiles | 生成 Makefile，精准进入源码依赖 |
 | **Phase 1** | 底层汇编器、寄存器与 OS/CPU 粘合 | **`[x] 100% 已完成`** | RV64GC 指令发射、寄存器系统、AMO/OrderAccess、Linux 信号 | `./docker/make.sh hotspot` 编译通过汇编与 OS 层 |
-| **Phase 2** | 模板解释器与运行时 Stubs 跑通 | `[ ] 待开始` | 200+ 字节码模板、栈帧模型、call_stub、全局安全点 | `-Xint -version` 成功执行并打印 Hello World |
+| **Phase 2** | 模板解释器与运行时 Stubs 跑通 | **`[x] 100% 已完成`** | 200+ 字节码模板、栈帧模型、call_stub、全局安全点 | `-Xint -version` 成功执行并打印 Hello World |
 | **Phase 3** | C1 客户端编译器与 Parallel/Serial GC | `[ ] 待开始` | C1 线性扫描寄存器分配、LIR 汇编、PS 卡表写屏障 | 开启 `-XX:TieredStopAtLevel=1` 稳定运行大对象分配 |
 | **Phase 4** | CMS 与 G1 垃圾回收器写屏障集成 | `[ ] 待开始` | CMS store-check 屏障、G1 SATB 预写屏障、跨 Region 脏卡队列 | 跑通 `jtreg:gc/g1` 与 `gc/cms` 并发标记测试 |
 | **Phase 5** | C2 服务端编译器与 riscv64.ad 架构定义 | `[ ] 待开始` | 适配 JDK 8 ADLC 的 riscv64.ad、指令匹配、分层编译 | 成功开启 `-XX:+TieredCompilation` 稳定冷启动 Spring Boot |
@@ -176,7 +176,7 @@
 ## 四、【Phase 2】模板解释器与运行时 Stubs（字节码跑通）
 
 * **阶段定位**：实现纯解释器模式（`-Xint`）下的完整运行，打通 Java 字节码执行闭环
-* **阶段状态**：`进行中（Sprint 2.1 已交付）`
+* **阶段状态**：**`[x] 100% 已完成 (Milestone 1 达成)`**
 
 ### 【Sprint Card 2.1】运行时基础 Stubs 生成器
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
@@ -229,23 +229,30 @@
 
 ### 【Sprint Card 2.3】模板解释器核心表与 200+ 字节码模板
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **对应源码**：`templateTable_riscv_64.cpp`, `templateInterpreter_riscv.cpp`
+* **状态**：`[x] 已完成`
+* **对应源码**：[`hotspot/src/cpu/riscv/vm/templateTable_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateTable_riscv.cpp), [`hotspot/src/cpu/riscv/vm/templateInterpreter_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateInterpreter_riscv.cpp)
 * **核心验收 Checklist**：
-  - [ ] 逐一实现 200+ 个 Java 字节码指令的汇编模板（加载、存储、常量压栈、算术逻辑、分支跳转、对象创建与字段访问）；
-  - [ ] 实现 `invokevirtual`, `invokestatic`, `invokespecial`, `invokedynamic` 方法分派；
-  - [ ] 在 `putfield` / `putstatic` 中注入规范的 Release 屏障。
+  - [x] 逐一实现 200+ 个 Java 字节码指令的汇编模板（加载、存储、常量压栈、算术逻辑、分支跳转、对象创建与字段访问）；
+  - [x] 实现 `invokevirtual`, `invokestatic`, `invokespecial`, `invokedynamic` 方法分派；
+  - [x] 修复 `checkcast` 与 `instanceof` 中对表达式栈（`esp`）的 `push`/`pop` 维护；
+  - [x] 在 `putfield` / `putstatic` 中注入规范的 Release 屏障。
 
 ### 【Sprint Card 2.4】基于全局页的安全点轮询与自重写屏障
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **对应源码**：`templateTable_riscv_64.cpp`, `macroAssembler_riscv.cpp`
+* **状态**：`[x] 已完成`
+* **对应源码**：[`hotspot/src/cpu/riscv/vm/templateTable_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateTable_riscv.cpp), [`hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp)
 * **核心验收 Checklist**：
-  - [ ] 适配 JDK 8u 单一全局安全点轮询页机制（读取 `os::get_polling_page()` 触发 SIGSEGV）；
-  - [ ] 在 `TemplateTable::patch_bytecode` 字节码自重写中强制插入数据依赖写写屏障（避免 JDK-8248219 随机崩溃）。
+  - [x] 适配 JDK 8u 单一全局安全点轮询页机制（读取 `os::get_polling_page()` 触发 SIGSEGV）；
+  - [x] 在 `call_VM_leaf_base` 中强制保护 `t0` 与 `xmethod`（`t6`），杜绝 C++ ABI 覆盖；
+  - [x] 修复 `remove_activation`，完整支持 `synchronized` 方法解锁与结构化锁校验；
+  - [x] 补齐 `Interpreter::_remove_activation_entry` 异常栈展开例程；
+  - [x] 在 `TemplateTable::patch_bytecode` 字节码自重写中强制插入数据依赖写写屏障（避免 JDK-8248219 随机崩溃）。
 
-### 【Sprint Card 2.5】里程碑验收（Milestone 1）
+### 【Sprint Card 2.5】里程碑验收（Milestone 1 达成）
 * **核心验收 Checklist**：
-  - [ ] 在 QEMU 下成功执行 `./docker/qemu-java.sh -Xint -version`；
-  - [ ] 成功执行 `./docker/qemu-java.sh -Xint HelloWorld` 并正确打印输出。
+  - [x] 在 QEMU 下成功执行 `./docker/qemu-java.sh -Xint -version`（100% 成功输出版本号并以 0 退出）；
+  - [x] 成功执行 `./docker/qemu-java.sh -Xint Hello` 并正确打印 `Hello, RISC-V OpenJDK 8u!`；
+  - [x] 成功执行多场景压力单测 `ComprehensiveTest`（包含算术递归、嵌套 Synchronized、异常捕获展开、HashMap 集合遍历），全部 PASS！
 
 ---
 

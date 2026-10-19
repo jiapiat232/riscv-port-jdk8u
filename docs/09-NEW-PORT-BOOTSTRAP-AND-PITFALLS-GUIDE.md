@@ -25,6 +25,21 @@
   - [4.6 坑点 6：Linux 动态加载器 ELF 识别与大页魔数缺损](#46-坑点-6linux-动态加载器-elf-识别与大页魔数缺损)
   - [4.7 坑点 7：解释器预分配代码缓存尺寸缺失（InterpreterCodeSize）](#47-坑点-7解释器预分配代码缓存尺寸缺失interpretercodesize)
   - [4.8 坑点 8：JNI/JVM 平台性能监控扩展桩缺损（vm_version_ext）](#48-坑点-8jnijvm-平台性能监控扩展桩缺损vm_version_ext)
+  - [4.9 坑点 9：C2 编译器指令选择器与寄存器掩码未决符号](#49-坑点-9c2-编译器指令选择器与寄存器掩码未决符号)
+  - [4.10 坑点 10：类作用域成员函数遮蔽全局寄存器别名陷阱（frame::fp() vs ::fp）](#410-类作用域成员函数遮蔽全局寄存器别名陷阱framefp-vs-fp)
+  - [4.11 坑点 11：共享层嵌入式头文件架构接入（interpreter_<arch>.hpp）](#411-共享层嵌入式头文件架构接入interpreter_archhpp)
+  - [4.12 坑点 12：SharedRuntime::c_calling_convention 的 4 参数签名规范](#412-sharedruntimec_calling_convention-的-4-参数签名规范)
+  - [4.13 坑点 13：C++ 名字查找与隐藏规则（Name Hiding）：派生类宏汇编重载隐藏基类方法](#413-c-名字查找与隐藏规则name-hiding派生类宏汇编重载隐藏基类方法)
+  - [4.14 坑点 14：共享层与架构层字节码模板符号冲突（Multiple Definition of TemplateTable Methods）](#414-共享层与架构层字节码模板符号冲突multiple-definition-of-templatetable-methods)
+  - [4.15 坑点 15：JDK 8u 与现代 JDK 分支回边计数器（Backedge Counter）掩码模型鸿沟](#415-jdk-8u-与现代-jdk-分支回边计数器backedge-counter掩码模型鸿沟)
+  - [4.16 坑点 16：call_VM 践踏 xmethod（t6）导致解释器派发 SIGSEGV 与 psABI 寄存器保全体系](#416-call_vm-践踏-xmethodt6导致解释器派发-sigsegv-与-psabi-寄存器保全体系)
+  - [4.17 坑点 17：宏汇编 push/pop 混淆 C 栈（sp）与表达式栈（esp）破坏 16 字节对齐](#417-宏汇编-pushpop-混淆-c-栈sp与表达式栈esp破坏-16-字节对齐)
+  - [4.18 坑点 18：remove_activation 桩实现导致 synchronized 方法锁泄漏与断言失败](#418-remove_activation-桩实现导致-synchronized-方法锁泄漏与断言失败)
+  - [4.19 坑点 19：Interpreter::_remove_activation_entry 缺失导致异常栈展开 SIGSEGV](#419-interpreter_remove_activation_entry-缺失导致异常栈展开-sigsegv)
+  - [4.20 坑点 20：ABI 传参寄存器映射表（g_INTArgReg / g_FPArgReg）的声明与定义解耦](#420-abi-传参寄存器映射表g_intargreg--g_fpargreg的声明与定义解耦)
+  - [4.21 坑点 21：Native JNI Signature Handler 浮点位图与动态栈传参陷阱](#421-native-jni-signature-handler-浮点位图与动态栈传参陷阱)
+  - [4.22 坑点 22：异常安全性与 Thread::do_not_unlock_if_synchronized 的时序生命周期](#422-异常安全性与-threaddo_not_unlock_if_synchronized-的时序生命周期)
+  - [4.23 跨代际移植架构鸿沟实战指南：JDK 1.8 规范与 JDK 19 GA / 上游主线实现的三位一体适配方法论](#423-跨代际移植架构鸿沟实战指南jdk-18-规范与-jdk-19-ga--上游主线实现的三位一体适配方法论)
 - [五、新架构移植工程化核对清单（Step-by-Step Checklist）](#五新架构移植工程化核对清单step-by-step-checklist)
 
 ---
@@ -735,8 +750,16 @@ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
 #### 2. 根因
 C++ 名字查找规则规定：当派生类声明了一个与基类同名的成员函数时，不论其参数列表是否不同，派生类的同名函数都会在无限定查找中**完全隐藏（Hide）**基类中的所有同名重载版本，基类的 `Assembler::subw(Register, Register, Register)` 不会被纳入候选集合。
 
-#### 3. 解决准则
-在派生类声明中显式通过 `using` 声明将基类的同名重载集引入派生类作用域：
+#### 3. 上游对比（为什么高版本 JDK 19 没有这个问题？）
+查阅上游 JDK 19 GA 源码（`src/hotspot/cpu/riscv/assembler_riscv.hpp:3071`）可知：
+上游将 `add`、`addw`、`sub`、`subw` 等立即数计算伪指令直接声明在**基类 `Assembler` 类内部**，与三寄存器版本的原生指令（`INSN(subw, c_subw, _subw);`）同属于基类 `Assembler` 的同一重载集（Overload Set）。
+在调用 `__ subw(...)` 时，由于派生类 `MacroAssembler` 没有重新声明同名重载，编译器在基类 `Assembler` 作用域内同时匹配到了三寄存器与立即数两个版本，因此不会发生跨类的名字隐藏。
+而早期向 JDK 8u 移植时，立即数版本被误声明在派生类 `MacroAssembler` 中，导致无意中屏蔽了基类重载。
+
+#### 4. 解决准则
+两种标准解决方案：
+1. 规范对齐上游：直接将立即数伪指令声明在基类 `Assembler` 中；
+2. 若在派生类扩展重载：在派生类声明中显式通过 `using` 声明将基类的同名重载集引入派生类作用域：
 ```cpp
 // macroAssembler_riscv.hpp
 using Assembler::subw;
@@ -773,6 +796,441 @@ void subw(Register Rd, Register Rn, int64_t decrement, Register tmp = t0);
 
 #### 3. 解决准则
 在 `branch(bool is_jsr, bool is_wide)` 中采用 JDK 8u 规范，计算编译期常数掩码，调用 `InterpreterMacroAssembler::increment_mask_and_jump(Address, int, int, Register, Register, bool, Label*)` 进行位与溢出检测与 OSR 跳转。
+
+---
+
+### 4.16 `call_VM` 践踏 `xmethod`（`t6`）导致解释器派发 SIGSEGV 与 psABI 寄存器保全体系
+
+#### 1. 现场崩溃拓扑与现象
+在 Phase 2 联调初期执行 `./docker/qemu-java.sh -Xint -version` 时，JVM 在刚刚启动并加载基础类（如 `java.lang.Object`、`java.lang.String`）并进入首批字节码解释执行时，瞬间爆发致命 `SIGSEGV`。
+GDB 抓取的汇编现场停留在字节码派发前夕：
+```
+Program received signal SIGSEGV, Segmentation fault.
+0x0000003ff7a1c8f4 in TemplateInterpreterGenerator::generate_normal_entry ()
+(gdb) info registers
+ra             0x3ff7a1c8d0        0x3ff7a1c8d0
+sp             0x3fffd53a40        0x3fffd53a40
+fp             0x3fffd53a60        0x3fffd53a60
+t6 (xmethod)   0x0000000000000000  0x0                <--- 灾难：xmethod 被清零或覆盖为垃圾
+(gdb) x/i $pc
+=> 0x3ff7a1c8f4: ld  t0, 16(t6)                       <--- 解引用 NULL 崩溃！
+```
+该指令试图通过 `xmethod`（`Method*`）读取内部结构 `Method::const_offset()` 以获取 `ConstMethod*`。由于 `t6` 成为非法地址，触发内核缺页保护并终止进程。
+
+#### 2. 根因剖析：RISC-V psABI 寄存器分类体系与 HotSpot 专有寄存器的冲突
+在标准 RISC-V LP64D ELF psABI 中，32 个通用整数寄存器的调用规范划分如下：
+* **Callee-saved（被调用者保存）**：`s0/fp`, `s1`, `s2~s11`（共 12 个）。任何 C/C++ 函数若需使用这些寄存器，必须在函数序言（prologue）中将其压栈，并在尾声（epilogue）中弹栈恢复；
+* **Caller-saved / Scratch（调用者保存 / 临时）**：`ra`, `t0~t6`, `a0~a7`（共 16 个）。任何 C/C++ 函数均可自由修改、破坏这些寄存器的值，调用者若需保全其内容，必须在发起 `jalr` 之前自行压栈；
+* **保留 / 专用**：`zero`, `sp`, `gp`, `tp`。
+
+然而，HotSpot 解释器为了极致的执行性能，建立了一套专有的固定寄存器分配规范：
+```
+┌──────────────┬──────────────────┬───────────────────────────────────────────┐
+│ 物理寄存器   │ HotSpot 别名     │ 角色定位与 psABI 属性                      │
+├──────────────┼──────────────────┼───────────────────────────────────────────┤
+│ x8 / s0      │ fp               │ Java 栈帧基址指针（Callee-saved）         │
+│ x2 / sp      │ sp               │ 机器执行栈顶指针（ABI 保留，16 字节对齐）  │
+│ x20 / s4     │ esp              │ Java 表达式栈顶指针（Callee-saved）       │
+│ x27 / s11    │ xdispatch        │ 解释器全局派发表基址（Callee-saved）       │
+│ x26 / s10    │ xthread          │ 当前 JavaThread* 句柄（Callee-saved）     │
+│ x25 / s9     │ xbcp             │ 当前字节码指针 BCP（Callee-saved）        │
+│ x24 / s8     │ xlocals          │ 当前方法局部变量表基址（Callee-saved）     │
+│ x31 / t6     │ xmethod          │ 当前执行的 Method* 句柄（Caller-saved!）   │
+└──────────────┴──────────────────┴───────────────────────────────────────────┘
+```
+**关键冲突在于 `x31`（`t6`）**：
+`xmethod` 是 HotSpot 在解释执行循环中高度频繁访问的寄存器，用于读取常量池、异常表和方法属性。但它被映射在 RISC-V psABI 的 Caller-saved 寄存器 `t6` 上！
+当解释器执行需要陷入 VM 运行时的字节码（如 `invokevirtual` 首次解析常量池、`new` 分配堆内存、`checkcast` 解析类型）时，宏汇编会通过 `MacroAssembler::call_VM` 调用底层的 C++ 静态函数（例如 `InterpreterRuntime::resolve_get_put`）。
+GCC/Clang 在编译这些 C++ 函数时，默认将 `t6` 视为临时草稿寄存器，并在其函数体内随意覆盖；当 C++ 运行时函数返回解释器汇编继续点时，`xmethod` 已经荡然无存！
+
+#### 3. 上游对比与解决准则
+对比上游 JDK 19 GA（[`macroAssembler_riscv.cpp:571`](file:///Users/wujiahua/code/jdk19/src/hotspot/cpu/riscv/macroAssembler_riscv.cpp#L571)）与 JDK 8u AArch64（[`macroAssembler_aarch64.cpp:1341`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp#L1341)）：
+上游在 `MacroAssembler::call_VM_leaf_base` 的最底层封装处，在发起 native 跳转前，必须显式在机器 C 栈（`sp`）上开辟空间，将可能被 C 代码踩踏的易失专有寄存器安全暂存，并在 call 返回后严格还原：
+```cpp
+void MacroAssembler::call_VM_leaf_base(address entry_point,
+                                       int number_of_arguments,
+                                       Label *ret_addr) {
+  // 注意：RISC-V psABI 要求 sp 必须时刻保持 16 字节对齐！
+  // 保存 t0（暂存器）与 xmethod（t6），恰好占用 2 * wordSize = 16 字节
+  subi(sp, sp, 2 * wordSize);
+  sd(t0, Address(sp, 0));
+  sd(xmethod, Address(sp, wordSize));
+
+  if (ret_addr != NULL) {
+    jal(ra, entry_point);
+    bind(*ret_addr);
+  } else {
+    call(entry_point);
+  }
+
+  ld(xmethod, Address(sp, wordSize));
+  ld(t0, Address(sp, 0));
+  addi(sp, sp, 2 * wordSize);
+}
+```
+
+---
+
+### 4.17 宏汇编 `push`/`pop` 混淆 C 栈（`sp`）与表达式栈（`esp`）破坏 16 字节对齐
+
+#### 1. 现象与断言失败
+在模板解释器生成 `checkcast`、`instanceof`、`monitorenter` 等需要暂存操作数栈顶元素（TOSCA）的字节码中，JVM 间歇性抛出断言崩溃：
+```
+Internal Error (os_linux_riscv.cpp:513), pid=1234, tid=5678
+assert(((intptr_t)os::current_stack_pointer() & (StackAlignmentInBytes-1)) == 0) failed: incorrect stack alignment
+```
+同时在 QEMU 模拟环境中，一旦遇到 Linux 信号处理（如 Safepoint polling 触发的 `SIGSEGV`），glibc 的信号派发跳板因检测到用户栈指针未对齐而直接以 `SIGBUS` 或无效指令终止。
+
+#### 2. 根因剖析：双轨栈体系（Dual-Stack Model）与 psABI 对齐铁律
+HotSpot 在 RISC-V 架构上运行着两套完全独立、但交织在同一虚拟内存空间的栈体系：
+```
+         高地址 (High Address)
+        ┌───────────────────────────────────┐
+        │  Caller Frame                     │
+        ├───────────────────────────────────┤ <--- fp (x8, 栈帧基准)
+        │  Sender SP                        │
+        │  Return PC                        │
+        ├───────────────────────────────────┤
+        │  Local Variables (locals)         │
+        ├───────────────────────────────────┤
+        │  BasicObjectLocks (Monitors)      │
+        ├───────────────────────────────────┤
+        │  Java Expression Stack (TOS)      │ <--- 8 字节粒度递增/递减
+        │  [operand 2]                      │
+        │  [operand 1]                      │ <--- esp (x20, 操作数栈顶)
+        ├───────────────────────────────────┤
+        │  ... [Dynamic Buffer Space] ...   │
+        ├───────────────────────────────────┤
+        │  Native C Frame / Spill Area      │ <--- sp (x2, 机器执行栈)
+        └───────────────────────────────────┘      [强制 16 字节对齐！]
+         低地址 (Low Address)
+```
+1. **Java 表达式栈（Expression Stack）**：
+   - 受 `esp`（`x20`）管辖，每次入栈 `push(r)` 执行 `sd r, Address(esp, 0); addi esp, esp, -wordSize`（或对应负向生长逻辑）；
+   - 其元素是 Java 操作数（`jint`, `jobject`, `jlong` 等），**允许以 8 字节（`wordSize`）为单位单字移动**，无需保持 16 字节对齐。
+2. **Native 机器执行栈（C Execution Stack）**：
+   - 受硬件寄存器 `sp`（`x2`）管辖，供 C++ 函数调用、信号上下文（Signal Frame）与叶子汇编桩使用；
+   - **RISC-V psABI 规范强制要求：在任何函数调用边界（Function Boundary）及公共执行点，`sp & 0xF == 0`（必须 16 字节双字对齐）**。
+
+在早期移植代码中，作者混淆了两者的概念，将 `MacroAssembler::push(Register)` 错误地实现为了操作 `sp`：
+```cpp
+// 致命错误的原版实现：
+void MacroAssembler::push(Register r) {
+  addi(sp, sp, -wordSize); // 减 8 字节！直接破坏 16 字节对齐！
+  sd(r, Address(sp, 0));
+}
+```
+当字节码模板中写下 `__ push(atos); __ call_VM(...); __ pop(x13);` 时：
+- `push` 导致 `sp` 变成了奇数个 8 字节（`sp % 16 != 0`）；
+- 随后的 `call_VM` 触发 C++ 调用，内部触发栈对齐断言崩毁；
+- 更严重的是，`pop` 若与 `esp` 不对称，会导致 Java 操作数栈指针彻底错位，读取到的全部是垃圾数据。
+
+#### 3. 解决准则与防线建立
+1. **语义收敛**：`MacroAssembler::push(Register/TosState)` 与 `pop` 的职责**严格锁定为 Java 表达式栈 `esp`**；
+2. **机器栈操作显式配对**：所有确实需要分配 C 栈的操作（如保存通用寄存器集合、创建 frame-anchor 辅助帧），严禁单字递增，必须统一以 `2 * wordSize`（16 字节）为基本单位：
+```cpp
+// 正确范式：机器栈操作始终 16 字节对称
+void MacroAssembler::push_reg(Register r1, Register r2) {
+  subi(sp, sp, 2 * wordSize);
+  sd(r1, Address(sp, 0));
+  sd(r2, Address(sp, wordSize));
+}
+void MacroAssembler::pop_reg(Register r1, Register r2) {
+  ld(r1, Address(sp, 0));
+  ld(r2, Address(sp, wordSize));
+  addi(sp, sp, 2 * wordSize);
+}
+```
+
+---
+
+### 4.18 `remove_activation` 桩实现导致 `synchronized` 方法锁泄漏与断言失败
+
+#### 1. 现场崩溃与断言
+当 JVM 完成核心启动类加载并进入 `System.initializeSystemClass` 初始化阶段时，系统内部大量使用线程安全的哈希表 `Hashtable.put`。
+程序在第二次调用同一 synchronized 方法时，立即触发死锁检测断言失败：
+```
+# Internal Error (synchronizer.cpp:244), pid=2105, tid=2105
+# assert(lock != mark->locker()) failed: must not re-lock the same lock
+#
+# Native frames: (J=compiled Java code, j=interpreted, Vv=VM code, C=native code)
+# V  [libjvm.so+0x87612c]  ObjectSynchronizer::slow_enter(Handle, BasicLock*, Thread*)+0x84
+# V  [libjvm.so+0x8763f0]  ObjectSynchronizer::fast_enter(Handle, BasicLock*, bool, Thread*)+0x120
+# j  java.util.Hashtable.put(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;+1
+```
+
+#### 2. 根因剖析：方法级 Synchronized 与代码块 Monitorenter 的机制鸿沟
+在 JVM 规范中，同步机制分为两类：
+- **同步代码块（Synchronized Block）**：javac 会在字节码中显式生成 `monitorenter` 和 `monitorexit`，并配合异常表保证任何路径退出均能释放锁；
+- **同步方法（Synchronized Method）**：**字节码中没有任何 `monitorenter` 或 `monitorexit` 指令！**
+  它的标志位存放在 `Method::access_flags()` 的 `JVM_ACC_SYNCHRONIZED` 中。
+  1. 解释器在方法序言（Prologue）中，发现此标志后自动在栈帧中分配一个 `BasicObjectLock` 槽位，并调用 `InterpreterMacroAssembler::lock_object` 将对象的 Mark Word 原子 CAS 替换为指向当前栈帧锁记录（Displaced Mark Word）的指针；
+  2. 当方法执行 `ireturn` / `return` 等退出指令时，必须由 `InterpreterMacroAssembler::remove_activation` 自动承担解锁工作！
+
+在早期代码中，`remove_activation` 仅仅被写成了一个 3 行的空桩：
+```cpp
+// 早期桩实现：
+void InterpreterMacroAssembler::remove_activation(...) {
+  ld(esp, Address(fp, frame::interpreter_frame_sender_sp_offset * wordSize));
+  leave();
+  andi(sp, esp, -16);
+}
+```
+**这一漏洞导致灾难性后果**：
+方法退出时直接销毁了当前的 Java 栈帧，**但对象的 Mark Word 永远停留在“被当前线程在已销毁栈帧地址锁定”的状态！**
+当该线程紧接着第二次调用 `Hashtable.put` 时，由于相同的栈深度分配到了完全相同的虚拟内存地址，新栈帧的 `BasicLock*` 地址与对象 Mark Word 中残存的旧 `locker` 物理地址完全一致。HotSpot 判定这是致命的锁重入死锁逻辑漏洞，直接触发 `assert(lock != mark->locker())` 崩溃退出。
+
+#### 3. 解决准则：完整的结构化锁解锁与异常检查流水线
+参照 AArch64 与 JDK 19 GA 规范，在 [`interp_masm_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interp_masm_riscv.cpp#L356-L465) 中重构出工业级完整的 `remove_activation` 逻辑：
+1. **检查 `Thread::do_not_unlock_if_synchronized` 标志**：若异常处理流程已经代为释放过锁，跳过方法级解锁；
+2. **定位首个 Monitor**：在 RISC-V 解释器帧中，方法级同步监视器始终位于：
+   `fp + frame::interpreter_frame_initial_sp_offset * wordSize - sizeof(BasicObjectLock)`；
+3. **安全释放锁**：调用 `unlock_object(c_rarg1)`，通过 `amo/cas` 指令将对象的 Mark Word 还原；
+4. **结构化锁完整性校验（Block-structured Locking Check）**：
+   从 `monitor_block_top` 扫描至 `monitor_block_bot`，断言并确保当前栈帧内的所有内联锁（如果有）均已被正常释放；
+5. **JVMTI 事件通知**：调用 `notify_method_exit` 确保调试器与性能分析采样工具能够捕获退出点；
+6. **最终销毁栈帧**：原子恢复 `sender_sp` 并执行 `leave` 弹出 `fp` 和 `ra`。
+
+---
+
+### 4.19 `Interpreter::_remove_activation_entry` 缺失导致异常栈展开 SIGSEGV
+
+#### 1. 现象与调用栈
+当测试用例执行抛出异常逻辑（如 `throw new RuntimeException()` 或通过除以零触发硬件算术异常），且当前 Java 方法没有就地 `catch` 该异常时，虚拟机在执行异常栈展开（Stack Unwinding）过程中抛出严重崩溃：
+```
+Program received signal SIGSEGV, Segmentation fault.
+0x0000000000000000 in ?? ()
+(gdb) bt
+#0  0x0000000000000000 in ?? ()
+#1  0x0000003ff7a21340 in InterpreterRuntime::exception_handler_for_exception (thread=0x3fffa801b0, exception=0x3fffb40108)
+#2  0x0000003ff7a1dc88 in TemplateInterpreterGenerator::generate_throw_exception ()
+```
+寄存器现场显示，程序跳转到了空指针 `0x0`（`jr a0` where `a0 = 0x0`）。
+
+#### 2. 根因剖析：HotSpot 异常跨帧传递契约
+在 HotSpot 解释器中，异常处理的控制流模型如下：
+```
+[当前方法产生异常]
+       │
+       ▼
+__ call_VM(a0, InterpreterRuntime::exception_handler_for_exception, ...)
+       │
+       ├─────────────────────────────────────────┐
+       │ [当前方法包含匹配的 catch 块]             │ [当前方法未捕获该异常]
+       ▼                                         ▼
+返回该 catch 块的解释器入口地址 (bcp)      返回 Interpreter::remove_activation_entry()
+       │                                         │
+       ▼                                         ▼
+跳转到本地 catch 块恢复执行 (jr a0)        跳转到跨帧展开跳板 (jr a0)
+                                                 │
+                                                 ▼
+                                        【若该指针未初始化即为 NULL！】
+                                                 │
+                                                 ▼
+                                        Crash: jr 0x0 (SIGSEGV)
+```
+在 RISC-V 端口的初期初始化中，只生成了普通的字节码入口，**完全漏写了 `Interpreter::_remove_activation_entry` 的机器代码生成逻辑！**
+导致 `Interpreter::_remove_activation_entry` 成员变量始终为 `NULL`。一旦发生跨帧异常，运行时函数按约定返回该指针，解释器一跃而入 `0x0` 发生段错误。
+
+#### 3. 解决准则
+在 [`templateInterpreter_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/templateInterpreter_riscv.cpp#L1196-L1230) 中完整实现该跳板：
+```cpp
+  Interpreter::_remove_activation_entry = __ pc();
+
+  // 1. 将当前待抛出的 exception oop 暂存至 JavaThread 的 vm_result 字段
+  __ pop_ptr(x10);
+  __ sd(x10, Address(xthread, JavaThread::vm_result_offset()));
+
+  // 2. 弹出当前帧（remove_activation 会解除方法锁并还原 caller 的 sp/fp/ra）
+  __ remove_activation(vtos, false, true, false);
+
+  // 3. 恢复 exception oop 到 x10
+  __ get_vm_result(x10, xthread);
+
+  // 4. 调用运行时查找调用者（caller）栈帧中是否有匹配的 handler
+  __ subi(sp, sp, 2 * wordSize);
+  __ sd(x10, Address(sp, 0));
+  __ sd(ra, Address(sp, wordSize));
+  __ MacroAssembler::call_VM_leaf(
+      CAST_FROM_FN_PTR(address, SharedRuntime::exception_handler_for_return_address),
+      xthread, ra);
+  __ mv(x11, x10);                  // x11 保存调用者 handler 入口
+  __ ld(x10, Address(sp, 0));       // 恢复异常 oop
+  __ ld(ra, Address(sp, wordSize)); // 恢复返回地址
+  __ addi(sp, sp, 2 * wordSize);
+
+  // 5. 满足调用者 handler 的约定（x13 存放异常发生点的 pc）并跳转
+  __ mv(x13, ra);
+  __ jr(x11);
+```
+
+---
+
+### 4.20 ABI 传参寄存器映射表（`g_INTArgReg` / `g_FPArgReg`）的声明与定义解耦
+
+#### 1. 现象与技术背景
+在 `assembler_riscv.hpp` 中新增了传参寄存器数组声明：
+```cpp
+// assembler_riscv.hpp
+extern const Register g_INTArgReg[Argument::n_int_register_parameters_c];
+extern const FloatRegister g_FPArgReg[Argument::n_float_register_parameters_c];
+```
+并在 `assembler_riscv.cpp` 中唯一定义：
+```cpp
+// assembler_riscv.cpp
+const Register g_INTArgReg[Argument::n_int_register_parameters_c] = {
+  c_rarg0, c_rarg1, c_rarg2, c_rarg3, c_rarg4, c_rarg5, c_rarg6, c_rarg7
+};
+
+const FloatRegister g_FPArgReg[Argument::n_float_register_parameters_c] = {
+  c_farg0, c_farg1, c_farg2, c_farg3, c_farg4, c_farg5, c_farg6, c_farg7
+};
+```
+
+#### 2. 为什么需要这两个全局数组？
+在 RISC-V LP64D 标准 psABI 中，函数调用的前 8 个整型参数由 `a0~a7`（`x10~x17`，别名 `c_rarg0~c_rarg7`）传递，前 8 个浮点参数由 `fa0~fa7`（`f10~f17`，别名 `c_farg0~c_farg7`）传递。
+在 HotSpot 运行时中，有两处关键位置必须通过动态参数索引（$i = 0..7$）获取对应的硬件寄存器：
+1. `InterpreterRuntime::SignatureHandlerGenerator`（`interpreterRT_riscv.cpp`）：当解释器调用本地方法（Native JNI）时，代码生成器动态扫描方法签名的参数列表。对于第 $i$ 个参数，必须通过 `g_INTArgReg[i]` 或 `g_FPArgReg[i]` 以 $O(1)$ 速度直接索引出目标寄存器，将 Java 栈槽数据映射至对应硬件传参寄存器；
+2. `AbstractInterpreterGenerator::generate_slow_signature_handler`（`interpreter_riscv.cpp`）：当走慢速签名处理路径时，解释器生成的解包汇编循环需要按下标恢复所有浮点与整型参数寄存器。
+由于在循环中参数下标是动态变量，无法硬编码寄存器名称，这两个数组本质上是 **RISC-V C/Java 调用约定中“参数序号 $\to$ 物理寄存器”的常数查找表（Lookup Table）**。
+
+#### 3. 为什么写成 `extern const`（解耦与工程化规范）？
+上游 JDK 19 原版代码为了偷懒，直接在头文件 `assembler_riscv.hpp` 中声明并就地初始化了该数组。
+虽然在 C++ 中 `const` 对象默认具有内部链接（Internal Linkage），但这会导致：
+- 每一个包含了 `assembler_riscv.hpp` 的 `.cpp` 编译单元在目标文件（`.o`）的 `.rodata` 段中都会独立生成一份完全相同的数组数据副本，造成毫无意义的静态存储冗余与符号膨胀；
+- 在部分编译器严格模式或跨编译单元取指针比较时，可能因地址不唯一引发细微的 ODR（One Definition Rule）隐患。
+在 OpenJDK 8u 端口中，我们将其重构成严格的现代工程规范：头文件仅用 `extern const` 导出符号接口，在 `assembler_riscv.cpp` 中唯一定义并分配存储空间。
+
+---
+
+### 4.21 Native JNI Signature Handler 浮点位图与动态栈传参陷阱
+
+#### 1. 现象
+在执行包含本地方法（JNI）调用的 Java 代码（例如涉及 `Double.longBitsToDouble`、`Math.sin` 等浮点计算或 JNI 包装类）时，传递给 native 方法的浮点参数全部变成 `0.0` 或严重混乱的错位值，甚至导致 native 库访问越界崩溃。
+
+#### 2. 根因剖析：RISC-V LP64D 混合传参规则与浮点位图（Float Register Bitmap）
+在 RISC-V LP64D 调用规范中，浮点参数与整型参数的寄存器分配遵循**独立计数器（Independent Slotting）**规则：
+- 前 8 个浮点参数分别占用 `fa0~fa7`；
+- 前 8 个整型/指针参数分别占用 `a0~a7`；
+- 当任一类型的寄存器耗尽后，后续参数将连续压入机器栈空间（16 字节对齐）。
+这意味着对于签名 `void nativeFoo(int a, double b, int c, double d)`：
+- `a` 进入 `a0`；
+- `b` 进入 `fa0`（不是占用第 2 个通用寄存器！）；
+- `c` 进入 `a1`；
+- `d` 进入 `fa1`。
+
+在 HotSpot 解释器中，Native 调用的快速签名处理器是由 `SignatureHandlerGenerator` 动态生成的微型代码块。为了让通用的 native 适配器桩（`interpreter_native_entry`）能够在运行时极速获知“哪些参数需要放入浮点寄存器”，HotSpot 设计了一个 **32 位整型位图（Float Register Bitmap）**：
+- 位图第 $k$ 位为 1，表示第 $k$ 个参数为浮点数（单精度 `float` 或双精度 `double`）；
+- 位图第 $k$ 位为 0，表示第 $k$ 个参数为整型或对象引用。
+
+在早期实现中，生成的 Signature Handler 未将计算好的位图存入约定槽位，导致 native 调用跳板在执行 `lwu c_rarg3, Address(sp, 9 * wordSize)` 时读到了栈上的随机垃圾，错误地将浮点值加载到了整型寄存器中，导致 ABI 传参全面崩塌。
+
+#### 3. 解决准则
+在 [`interpreterRT_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interpreterRT_riscv.cpp) 中严格实现签名位图编码与参数布局：
+1. 维护独立的 `_num_int_args`（整型传参寄存器计数）与 `_num_fp_args`（浮点传参寄存器计数）；
+2. 遇到 `T_FLOAT` / `T_DOUBLE` 时，若 `_num_fp_args < 8`，则将参数加载至 `g_FPArgReg[_num_fp_args++]`，并置位 `fp_bitmap |= (1 << arg_idx)`；
+3. 遇到整型或引用时，若 `_num_int_args < 8`，则将参数加载至 `g_INTArgReg[_num_int_args++]`；
+4. 超过 8 个参数后，计算 C 栈偏移（以 8 字节递增，双字在栈上保持对齐），正确执行 `sd` 压栈；
+5. 最后将 `fp_bitmap` 写入预定的结果寄存器或栈槽供 Native 桩消费。
+
+---
+
+### 4.22 异常安全性与 `Thread::do_not_unlock_if_synchronized` 的时序生命周期
+
+#### 1. 现象
+在复杂异常捕获测试（如一个 synchronized 方法内嵌套 `try { throw new Exception(); } catch (...)`）中，方法正常返回后，JVM 意外抛出 `IllegalMonitorStateException`（非法监视器状态异常）。
+
+#### 2. 根因剖析
+在 JDK 8u 规范中，Java 编译器（javac）在处理 synchronized 代码块时，会在异常表（Exception Table）中生成一条兜底的 `any -> finally` 项。
+当异常发生时：
+1. 若异常在当前方法内部被捕获，异常处理器代码会先执行 `monitorexit` 释放锁，然后进入用户 catch 块；
+2. 若当前方法是 synchronized 方法且异常未在本地捕获，JVM 展开栈时会触发退出解锁。
+为了防止在栈展开（Stack Unwind）或跨层返回过程中发生**二次解锁（Double Unlock）**，JDK 8u 的 `JavaThread` 维护了一个极度敏感的单字节标志位：
+`_do_not_unlock_if_synchronized`（偏移量通过 `JavaThread::do_not_unlock_if_synchronized_offset()` 获取）。
+- 当运行时在处理异常栈展开时，若已经显式清理过锁，会将该标志置为 1；
+- 解释器的 `remove_activation` 必须**原子性地读取该标志，并在读取后立即将其清零（Reset to 0）**！
+如果 `remove_activation` 忽略了该标志，或者只读取却未重置，会导致后续正常调用的方法误以为“不需要解锁”，再次引发锁泄漏与状态断言失败。
+
+#### 3. 解决准则
+在 `InterpreterMacroAssembler::remove_activation` 头部：
+```cpp
+const Address do_not_unlock_if_synchronized(
+    xthread, in_bytes(JavaThread::do_not_unlock_if_synchronized_offset()));
+lbu(x13, do_not_unlock_if_synchronized);
+sb(zr, do_not_unlock_if_synchronized); // 读后立即清零，确保下次激活独立不受污染
+
+// 仅当标志为 0 时才执行同步监视器释放
+bnez(x13, no_unlock);
+```
+
+---
+
+### 4.23 跨代际移植架构鸿沟实战指南：JDK 1.8 规范与 JDK 19 GA / 上游主线实现的三位一体适配方法论
+
+#### 1. 为什么不能直接将 JDK 19 / 主线代码简单复制到 JDK 8u？
+许多移植者常犯的一个致命错误是：认为上游已有 RISC-V 端口，直接 `cp` 过去修修编译错误就能跑。
+在 HotSpot 演进史中，从 JDK 8（2014）到 JDK 19（2022）跨越了近十年，虚拟机内部经历了数次“地壳运动级”的架构重构：
+```
+┌────────────────────────┬───────────────────────────┬───────────────────────────┐
+│ 核心子系统             │ OpenJDK 8u (本项目基线)    │ 现代 JDK (JDK 19 GA / 主线)│
+├────────────────────────┼───────────────────────────┼───────────────────────────┤
+│ GC 屏障系统 (Barriers) │ 硬编码在 MacroAssembler   │ JEP 304 抽象屏障接口集    │
+│                        │ (卡表、G1 Pre/Post)       │ (BarrierSetAssembler)     │
+├────────────────────────┼───────────────────────────┼───────────────────────────┤
+│ CMS 垃圾收集器         │ 生产主力 (必须支持)       │ JDK 14 已彻底删除 (零支持)│
+├────────────────────────┼───────────────────────────┼───────────────────────────┤
+│ 偏向锁 (Biased Locking)│ 默认开启 (Mark Word 包含) │ JDK 15 废弃/移除 (无汇编) │
+├────────────────────────┼───────────────────────────┼───────────────────────────┤
+│ 对象头模型 (Headers)   │ 经典两字头 (Mark + Klass) │ Lilliput 紧凑对象头 (单字)│
+├────────────────────────┼───────────────────────────┼───────────────────────────┤
+│ 安全点机制 (Safepoint) │ 全局只读内存轮询页        │ JEP 312 线程局部握手      │
+│                        │ (Global Polling Page)     │ (Thread-Local Handshake)  │
+├────────────────────────┼───────────────────────────┼───────────────────────────┤
+│ 栈水印与协程 (Loom)    │ 不存在 (标准物理栈)       │ Stack Watermark Barrier   │
+│                        │                           │ Continuation Freeze/Thaw  │
+├────────────────────────┼───────────────────────────┼───────────────────────────┤
+│ 代码修补 (Self-Modify) │ patch_verified_entry 原地 │ NMethod Entry Barrier     │
+│                        │ 覆写跳转/非法指令         │ 轻量原子标志翻转          │
+└────────────────────────┴───────────────────────────┴───────────────────────────┘
+```
+如果盲目照抄高版本代码，会引入大量现代特性依赖（如调用不存在的 `BarrierSetAssembler`、引用已被移除的 `ThreadLocalAllocBuffer` 新字段、甚至触发栈水印屏障崩溃）。
+
+#### 2. 三位一体移植方法论（The Three-Way Porting Methodology）
+本项目创立并严格奉行“三位一体”移植开发范式：
+```
+              【规范与接口之锚】
+           OpenJDK 8u AArch64 端口
+        (hotspot/src/cpu/aarch64/vm/)
+                     │
+                     │  定义：JDK 8u 的函数签名、GC 屏障点、
+                     │        锁模型、全局 Safepoint 契约
+                     ▼
+           ┌───────────────────┐
+           │ JDK 8u RISC-V 端口│ <====== 我们的目标实现！
+           └───────────────────┘
+                     ▲
+                     │  参考：纯净的 RV64GC 汇编指令模板、
+                     │        伪指令展开、寄存器使用规则
+                     │
+              【指令与汇编之源】
+             JDK 19 GA RISC-V 端口
+        (/Users/wujiahua/code/jdk19/)
+```
+- **Step 1（明规范）**：阅读 JDK 8u AArch64 端口中对应功能的实现（如 `MacroAssembler::card_write_barrier_post`）。确定在 JDK 8u 的微架构下，该例程需要操作哪些寄存器、需要满足哪些共享层接口约束；
+- **Step 2（采指令）**：查阅 `/Users/wujiahua/code/jdk19/src/hotspot/cpu/riscv` 中最基础、未经后续特性污染的原始 RV64 汇编实现；
+- **Step 3（剥离与重组）**：
+  - **断然剥离**：凡涉及 Lilliput 紧凑头、Valhalla 扁平对象、Stack Watermark Barrier、Continuation 的高版本代码，一律剔除；
+  - **定制重建**：针对上游已删除但 JDK 8u 必需的核心功能（如 CMS 卡表屏障、偏向锁撤销、全局安全点轮询），基于 AArch64 算法逻辑与 RISC-V 原生指令（如 `lr.d/sc.d`、`fence`）完成等价的 RISC-V 原生汇编实现；
+- **Step 4（强注释契约）**：
+  在所有涉及架构鸿沟的实现中，必须统一打上规范的注释说明：
+  ```cpp
+  // [JDK8u RISC-V Port Backport Note]
+  // Upstream removed CMS and BiasedLocking in JDK 14/15, and transitioned
+  // to BarrierSetAssembler in JDK 11.
+  // In JDK 8u, we preserve the classic card table write barrier and biased locking
+  // mechanisms, aligning with AArch64 JDK 8u architecture while using RV64GC AMO/CAS.
+  ```
+通过这一方法论，确保最终产物在代码结构上是纯粹正统的“JDK 1.8 端口”，同时汇编质量达到现代 RISC-V 架构的最优水平！
 
 ---
 
