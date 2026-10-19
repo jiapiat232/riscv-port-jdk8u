@@ -323,8 +323,8 @@ class CompiledStaticCall: public NativeCall {
   friend CompiledStaticCall* compiledStaticCall_at(Relocation* call_site);
 
   // Code
-#if defined(AARCH64) && !defined(ZERO)
-  static address emit_to_interp_stub(CodeBuffer &cbuf, address mark);
+#if (defined(AARCH64) || defined(RISCV)) && !defined(ZERO)
+  static address emit_to_interp_stub(CodeBuffer &cbuf, address mark = NULL);
 #else
   static address emit_to_interp_stub(CodeBuffer &cbuf);
 #endif

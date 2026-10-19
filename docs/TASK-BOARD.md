@@ -285,36 +285,58 @@
 
 ---
 
-## 五、【Phase 3】C1 客户端编译器与 Parallel/Serial GC
+## 五、【Phase 3】代码修补重定位层与 C1 客户端编译器
 
-* **阶段定位**：打通一阶段 JIT 编译能力，大幅提升热点循环吞吐
-* **阶段状态**：`[ ] 待开始`
+* **阶段定位**：打通代码修补/重定位/蹦床底座与一阶段 JIT 编译能力（C1），大幅提升热点循环吞吐
+* **阶段状态**：`[ ] 进行中（已完成 Sprint Card 3.0，正在推进 Sprint Card 3.1）`
 
-### 【Sprint Card 3.1】C1 LIR 指令生成与线性扫描寄存器分配
+### 【Sprint Card 3.0】代码修补、重定位与内联缓存/蹦床层（JIT 前置基座）
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **对应源码**：`c1_LIRGenerator_riscv.cpp`, `c1_FrameMap_riscv.cpp`
+* **状态**：`[x] 已完成`
+* **对应源码**：
+  * [`hotspot/src/cpu/riscv/vm/nativeInst_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/nativeInst_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/relocInfo_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/relocInfo_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/compiledIC_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/compiledIC_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/icBuffer_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/icBuffer_riscv.cpp)
+  * [`hotspot/src/cpu/riscv/vm/assembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/assembler_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp)
+  * [`hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp)
+* **核心验收 Checklist**：
+  - [x] 解耦定长 6 指令（24 字节）可修补 `MacroAssembler::movptr` 与变长立即数加载 `MacroAssembler::li`；
+  - [x] 实现定长 2 指令（8 字节：`lui + addiw`）`li32`，支持 `set_narrow_oop` / `set_narrow_klass` 与 `patch_oop`；
+  - [x] 修复 `mov_metadata` 与 `movoop` 中漏调 `code_section()->relocate(pc(), rspec)` 的隐患；
+  - [x] 完整实现 `Assembler::extract / sextract / patch` 与 `MacroAssembler::pd_patch_instruction_size / target_addr_for_insn / pd_call_destination`；
+  - [x] 完整实现 `NativeCall`（4 字节 `jal`）、`NativeCallTrampolineStub`（`auipc + ld + jr + 64位目标`）、`NativeMovConstReg`、`NativeJump`、`NativeGeneralJump`、`NativeIllegalInstruction`；
+  - [x] 完整实现 `MacroAssembler::trampoline_call`、`emit_trampoline_stub`、`ic_call`、`emit_static_call_stub`；
+  - [x] 完整实现 `Relocation::pd_set_data_value`、`pd_call_destination`、`pd_set_call_destination`、`pd_address_in_code`；
+  - [x] 编译通过并在 `-Xint` 下回归验证 RISC-V `javac` 与 `ComprehensiveTest`。
+
+### 【Sprint Card 3.1】C1 寄存器映射、C1 宏汇编、CodeStubs 与 Runtime1 桩
+* **责任模块**：`hotspot/src/cpu/riscv/vm/`
+* **对应源码**：`c1_FrameMap_riscv.cpp`, `c1_MacroAssembler_riscv.cpp`, `c1_CodeStubs_riscv.cpp`, `c1_Runtime1_riscv.cpp`
 * **核心验收 Checklist**：
   - [ ] 定义 C1 虚拟寄存器映射与物理寄存器池掩码（Caller/Callee-saved 分配规则）；
-  - [ ] 移植 HIR 到 LIR 的平铺发射规则。
+  - [ ] 实现 `C1_MacroAssembler`（`inline_cache_check`、`build_frame`、`allocate_object`、`allocate_array`、`lock_object`、`unlock_object`）；
+  - [ ] 实现 `c1_CodeStubs_riscv.cpp` 与 `c1_Runtime1_riscv.cpp` 全部运行时存根。
 
-### 【Sprint Card 3.2】C1 LIR 汇编器与运行时桩
+### 【Sprint Card 3.2】C1 LIR 生成器与 LIR 汇编器
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **对应源码**：`c1_LIRAssembler_riscv.cpp`, `c1_Runtime1_riscv.cpp`
+* **对应源码**：`c1_LIRGenerator_riscv.cpp`, `c1_LIRAssembler_riscv.cpp`, `c1_LinearScan_riscv.cpp`
 * **核心验收 Checklist**：
-  - [ ] 实现 LIR 到 RISC-V 本地机器码的发射器；
-  - [ ] 实现 C1 运行时存根（分配对象慢速桩、异常抛出桩、反优化 Trap 桩）。
+  - [ ] 移植 HIR 到 LIR 的平铺发射规则（`c1_LIRGenerator_riscv.cpp`）；
+  - [ ] 实现 LIR 到 RISC-V 本地机器码的发射器（`c1_LIRAssembler_riscv.cpp`），并移除 `compiler_stubs_riscv.cpp` 中的 C1 桩。
 
-### 【Sprint Card 3.3】Parallel Scavenge 与 Serial GC 卡表写后屏障
+### 【Sprint Card 3.3】C1 四大 GC（Serial / Parallel / CMS / G1）写屏障集成
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **对应源码**：`macroAssembler_riscv.cpp`, `c1_LIRAssembler_riscv.cpp`
+* **对应源码**：`c1_LIRGenerator_riscv.cpp`, `c1_CodeStubs_riscv.cpp`, `c1_Runtime1_riscv.cpp`
 * **核心验收 Checklist**：
-  - [ ] 在解释器与 C1 写入堆对象字段后发射卡表后置脏标记（`byte_map_base + (addr >> 9) = 0`）；
-  - [ ] 确保与 JDK 8 AArch64 的卡表写入策略完全对齐。
+  - [ ] 在 C1 LIR 层完整对接 CardTable（Serial/Parallel/CMS）写后屏障与 G1 SATB 预写屏障 / Dirty Card 写后屏障。
 
 ### 【Sprint Card 3.4】里程碑验收（Milestone 2）
 * **核心验收 Checklist**：
-  - [ ] 启用 `-XX:TieredStopAtLevel=1` 运行复杂循环，通过 `PrintAssembly` 观测到 C1 机器码；
-  - [ ] 在 ParallelGC 下完成长时间大对象分配压力测试，无死锁、无泄漏。
+  - [ ] 启用 `-XX:TieredStopAtLevel=1` 稳定运行 `-version`、`Hello`、`ComprehensiveTest` 与 `javac`；
+  - [ ] 在四大 GC 下通过 C1 JIT 编译执行压力测试，无死锁、无堆损坏。
 
 ---
 

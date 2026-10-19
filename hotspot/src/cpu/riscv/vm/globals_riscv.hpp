@@ -79,6 +79,9 @@ define_pd_global(intx, InlineSmallCode,          1000);
           "Use memory barriers to implement volatile accesses")            \
   product(bool, UseRVC, false,                                             \
           "Use RVC instructions")                                          \
+  product(bool, UseConservativeFence, true,                                \
+          "Extend i for r and o for w in the pred/succ flags of fence;"    \
+          "Extend fence.i with fence.i + fence.")                          \
   product(bool, AvoidUnalignedAccesses, false,                             \
           "Avoid generating unaligned memory accesses")                    \
   product(bool, TraceTraps, false, "Trace all traps the signal handler")

@@ -110,6 +110,18 @@ extern const FloatRegister g_FPArgReg[Argument::n_float_register_parameters_c];
 
 class Assembler : public AbstractAssembler {
  public:
+  enum {
+    instruction_size = 4,
+    compressed_instruction_size = 2
+  };
+
+  // The maximum range of a branch (jal) is fixed for the RISCV architecture.
+  static const unsigned long branch_range = 1 * M;
+
+  static bool reachable_from_branch_at(address branch, address target) {
+    return uabs(target - branch) < branch_range;
+  }
+
   // Immediate validation predicates
   static inline bool is_simm12(intptr_t x) {
     return -2048 <= x && x <= 2047;
@@ -125,6 +137,64 @@ class Assembler : public AbstractAssembler {
   }
   static inline bool is_simm32(intptr_t x) {
     return (int32_t)x == x;
+  }
+  static inline bool is_imm_in_range(int64_t val, int nbits, int shift) {
+    int64_t max = (1LL << (nbits - 1)) - 1;
+    int64_t min = -(1LL << (nbits - 1));
+    int64_t s_val = val >> shift;
+    return (val == (s_val << shift)) && (s_val >= min) && (s_val <= max);
+  }
+  static inline bool is_offset_in_range(int64_t offset, int nbits) {
+    if (nbits == 32) {
+      return offset >= -((1LL << 31) + (1LL << 11)) && offset < ((1LL << 31) - (1LL << 11));
+    }
+    return is_imm_in_range(offset, nbits, 0);
+  }
+
+  static inline uint32_t extract(uint32_t val, unsigned msb, unsigned lsb) {
+    assert(msb >= lsb && msb <= 31, "invalid bit range");
+    unsigned nbits = msb - lsb + 1;
+    uint32_t mask = (nbits == 32) ? ~0U : ((1U << nbits) - 1);
+    uint32_t result = val >> lsb;
+    result &= mask;
+    return result;
+  }
+
+  static inline int32_t sextract(uint32_t val, unsigned msb, unsigned lsb) {
+    assert(msb >= lsb && msb <= 31, "invalid bit range");
+    int32_t result = val << (31 - msb);
+    result >>= (31 - msb + lsb);
+    return result;
+  }
+
+  static void patch(address a, unsigned msb, unsigned lsb, unsigned val) {
+    assert(a != NULL, "null address");
+    assert(msb >= lsb && msb <= 31, "invalid bit range");
+    unsigned nbits = msb - lsb + 1;
+    guarantee(nbits == 32 || val < (1U << nbits), "Field too big for insn");
+    unsigned mask = (nbits == 32) ? ~0U : ((1U << nbits) - 1);
+    val <<= lsb;
+    mask <<= lsb;
+    unsigned target = *(unsigned *)a;
+    target &= ~mask;
+    target |= val;
+    *(unsigned *)a = target;
+  }
+
+  static void patch(address a, unsigned bit, unsigned val) {
+    patch(a, bit, bit, val);
+  }
+
+  static void patch_reg(address a, unsigned lsb, Register reg) {
+    patch(a, lsb + 4, lsb, reg->encoding_nocheck());
+  }
+
+  static void patch_reg(address a, unsigned msb, unsigned lsb, Register reg) {
+    patch(a, msb, lsb, reg->encoding_nocheck());
+  }
+
+  static void patch_reg(address a, unsigned lsb, FloatRegister reg) {
+    patch(a, lsb + 4, lsb, reg->encoding_nocheck());
   }
 
   // Opcodes according to RISC-V Unprivileged ISA Specification
@@ -495,6 +565,22 @@ class Assembler : public AbstractAssembler {
   void fmv_d(FloatRegister rd, FloatRegister rs) { if (rd != rs) fsgnj_d(rd, rs, rs); }
   void fabs_d(FloatRegister rd, FloatRegister rs) { fsgnjx_d(rd, rs, rs); }
   void fneg_d(FloatRegister rd, FloatRegister rs) { fsgnjn_d(rd, rs, rs); }
+
+  void li32(Register rd, int32_t imm) {
+    int64_t upper = imm, lower = imm;
+    lower = (imm << 20) >> 20;
+    upper -= lower;
+    upper = (int32_t)upper;
+    lui(rd, upper);
+    addiw(rd, rd, lower);
+  }
+
+  void ifence() {
+    fence_i();
+    if (UseConservativeFence) {
+      fence(0xf, 0xf);
+    }
+  }
 
   virtual RegisterOrConstant delayed_value_impl(intptr_t* delayed_value_addr,
                                                 Register tmp,

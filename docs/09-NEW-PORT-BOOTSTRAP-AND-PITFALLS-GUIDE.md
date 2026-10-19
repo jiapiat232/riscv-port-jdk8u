@@ -1417,7 +1417,115 @@ assert(bs->is_a(BarrierSet::CardTableModRef), "Resizeable card table is not supp
 
 ---
 
-## 五、新架构移植工程化核对清单（Step-by-Step Checklist）
+### 4.30 定长可修补序列 `movptr`（6 条指令 24 字节）vs 变长立即数加载 `li`（1~6 条指令）的指令覆写踩踏
+
+#### 1. 问题现象與潜在灾难
+在解释器阶段，常量与指针加载几乎不需要在运行期被回填修改。但一旦进入 Step 3.0（代码修补、重定位与内联缓存层）与 C1/C2 编译器阶段，大量代码点在编译期发射的是 **`0`（`NULL`）或占位符**，并在运行期通过 `NativeMovConstReg::set_data`、`Relocation::pd_set_data_value` 或 `NativeMovRegMem::set_offset` 动态回填真实的 48 位地址或偏移！
+典型场景包括：
+1. `CompiledStaticCall::emit_to_interp_stub` 中发射 `mov_metadata(xmethod, (Metadata*)NULL)`，在运行期 `set_to_interpreted` 时回填真实的 `Method*`；
+2. `MacroAssembler::ic_call` 中发射 `movptr(xmethod, Universe::non_oop_word())`，在单态内联缓存命中时回填 `Klass*` 或 `CompiledICHolder*`；
+3. C1 `PatchingStub`（`jobject2reg_with_patching`、`klass2reg_with_patching`、字段偏移动态修补 `NativeMovRegMem`）在编译期由于类尚未加载，先发射 `movptr(reg, 0)`，待运行期触发类初始化后再原位将 48 位 `Klass*` / `oop` / 字段偏移写入指令流。
+
+#### 2. 根因深度剖析
+在早期解释器开发中，[`MacroAssembler::movptr`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L63-L88) 对特殊值做了贪婪的变长压缩优化：
+- 当 `val == 0` 时，收缩为 **1 条指令（4 字节）**：`mv(dst, zr)`（即 `addi dst, zr, 0`）；
+- 当 `is_simm12(val)` 时，收缩为 **1 条指令（4 字节）**：`addi(dst, zr, val)`；
+- 当 `is_simm32(val)` 时，收缩为 **1~2 条指令（4~8 字节）**：`lui + [addiw]`；
+- 甚至在 48 位展开末尾，当低 6 位 `offset == 0`（例如 8 字节对齐的指针且第 6~11 位恰好 aligned）时，省去了最后一条 `addi(dst, dst, offset)`，变成了 **5 条指令（20 字节）**！
+
+然而，在 RISC-V 64（Sv48，48 位虚拟地址空间）上，由于指令定长 32 位且立即数位宽受限（U-type 20 位，I-type 12 位），在不借用额外临时寄存器的前提下，加载任意 48 位地址的标准可修补序列 `movptr` 必须严格由 **6 条固定指令（24 字节）** 组成：
+```text
+  +0: lui   rd, imm[47:29] + sign_fixup   // 加载高 19 位（含符号位补偿）
+  +4: addi  rd, rd, imm[28:17]            // 拼接中间 12 位（至此完成高 31 位）
+  +8: slli  rd, rd, 11                    // 左移 11 位
+ +12: addi  rd, rd, imm[16:6]             // 拼接接下来的 11 位（无符号，0..0x7ff）
+ +16: slli  rd, rd, 6                     // 左移 6 位
+ +20: addi  rd, rd, imm[5:0]              // 拼接最低 6 位（或合入 jalr/ld 的偏移字段）
+```
+如果编译期 `movptr(reg, 0)` 只发射了 1 条 4 字节指令，而运行期 `patch_addr_in_movptr` 按照 24 字节（6 条指令）去回填，就会**直接覆写后续 5 条正常指令（20 字节）**，或者在 `NativeInstruction::is_movptr_at` 校验时直接触发 `fatal("not a movptr...")` 崩溃！
+
+#### 3. 完美解决方案
+严格区分两个宏汇编原语的语义边界（[`macroAssembler_riscv.cpp:36-110`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L36-L110)）：
+1. **`MacroAssembler::movptr(Register dst, intptr_t val)`**：**严格定长 6 条指令（24 字节）**。内部调用 `movptr_with_offset(dst, (address)val, offset)` 后**无条件**发射第 6 条 `addi(dst, dst, offset)`（哪怕 `val == 0` 或 `offset == 0`），确保任何 `movptr` 调用点都满足 `NativeInstruction::is_movptr_at` 契约；
+2. **`MacroAssembler::li(Register Rd, int64_t imm)`**：**变长优化立即数加载（1~6+ 条指令）**。仅用于编译期已知且运行期绝不修补的纯算术常数加载；
+3. **`Assembler::li32(Register Rd, int32_t imm)`**：**严格定长 2 条指令（8 字节：`lui + addiw`）**。专用于开启压缩指针（`UseCompressedOops` / `UseCompressedClassPointers`）时 32 位 `narrowOop` / `narrowKlass` 的可修补加载（`set_narrow_oop` / `set_narrow_klass`），由 `NativeInstruction::is_li32_at` 与 `patch_imm_in_li32` 识别并原位回填。
+
+---
+
+### 4.31 `movoop` 与 `mov_metadata` 漏掉 `Relocation` 注册及 JDK 8 vs JDK 19 的 `jobject` 立即数鸿沟
+
+#### 1. 问题现象与架构鸿沟
+在审查 [`MacroAssembler::mov_metadata`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L2122-L2131) 与 [`MacroAssembler::movoop`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L2133-L2147) 时，发现了两个致命问题：
+1. **重定位丢失 Bug**：早期代码虽然调用 `oop_recorder()->find_index(obj)` 构造了 `RelocationHolder rspec = oop_Relocation::spec(oop_index)`，但随后直接调用了 `movptr(dst, (intptr_t)obj)`，**完全漏掉了 `code_section()->relocate(pc(), rspec)`**！
+2. **JDK 8 vs JDK 19 架构鸿沟（NMethod Entry Barrier 与常量池 vs 内联立即数）**：
+   - 在 JDK 19 RISC-V（`macroAssembler_riscv.cpp:1244-1278`）中，`movoop(Register dst, jobject obj, bool immediate)` 的默认参数是 `immediate = false`，且内部耦合了 JDK 12+ 引入的 `BarrierSet::barrier_set()->barrier_set_nmethod()`（NMethod Entry Barrier，用于并发 GC 栈扫描）。当 `immediate == false` 时，JDK 19 通过 `ld_constant` 生成基于常量池（Constant Pool Section）的 `auipc + ld` 指令。
+   - 但在 **JDK 8u** 中，既没有 `BarrierSetNMethod`，且 **C1 编译器（`LIR_Assembler`）在编译时不分配常量池节（Constant Pool Section）**！JDK 8u 的 C1 要求 `movoop` 默认将 `oop` 作为内联立即数（6 条指令 `movptr`）直接编码进指令流，并在 GC 移动对象时通过 `oop_Relocation` 原位修补这 6 条指令！
+
+#### 2. 根因深度剖析：如果漏掉 `code_section()->relocate(pc(), rspec)` 会发生什么？
+在 HotSpot JIT 编译器（C1/C2）中，编译线程运行在编译器上下文中，不能直接裸持堆内 `oopDesc*`，因此所有常量对象都是用 **`jobject`（即指向 `JNIHandleBlock` 槽位的间接指针 `oop*`）** 表示的！
+- 编译期：`movoop(dst, obj)` 发射到指令流里的初始值实际上是 **`(intptr_t)obj`（即 `JNIHandle` 的地址，而不是堆内对象的真实地址 `JNIHandles::resolve(obj)`！）**；
+- 安装期（`nmethod::new_nmethod` $\rightarrow$ `CodeBuffer::copy_code_to` $\rightarrow$ `fix_oop_relocation`）：HotSpot 遍历代码段中的所有 `oop_Relocation`，将 `OopRecorder` 中的 `jobject` 解引用（`JNIHandles::resolve`）得到真正的堆内 `oopDesc*`，然后调用 `Relocation::pd_set_data_value` 把指令流中的 `JNIHandle` 地址改写为真正的 `oopDesc*`！
+- 运行期（GC）：每次 Young GC / Full GC 移动了该对象，GC 都会遍历 `nmethod` 的 `oop_Relocation` 并调用 `pd_set_data_value` 更新指令流中的立即数地址。
+- **后果**：如果 `movoop` 漏掉了 `code_section()->relocate(pc(), rspec)`，生成出来的机器码里装进寄存器的永远是 `JNIHandle` 槽位自身的C堆地址！一旦 Java 代码访问该对象的字段或方法表，就会把 `JNIHandle` 槽位当成 `oopDesc` 头去解引用 `_metadata._klass`，瞬间触发诡异的堆损坏或 `SIGSEGV`！
+
+#### 3. 完美解决方案
+在 [`macroAssembler_riscv.cpp:104-110, 2122-2180`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L2122-L2180) 中：
+1. 实现 `MacroAssembler::mv(Register Rd, Address dest)`：在 `InstructionMark` 保护下显式调用 `code_section()->relocate(pc(), dest.rspec())`，再发射定长 `movptr(Rd, (intptr_t)dest.target())`；
+2. 将 `MacroAssembler::movoop(Register dst, jobject obj, bool immediate = true)` 的默认参数设为 `immediate = true`（对齐 JDK 8u C1/C2 规范），内部通过 `mv(dst, Address((address)obj, rspec))` 同时完成重定位注册与 6 指令定长发射；
+3. 在 `set_narrow_oop` 中使用 JDK 8u 的 `oopDesc::encode_heap_oop(JNIHandles::resolve(obj))`（替代 JDK 19 的 `CompressedOops::narrow_oop_value`），在 `set_narrow_klass` 中使用 `Klass::encode_klass(k)`（替代 JDK 19 的 `CompressedKlassPointers::encode`），并均在 `InstructionMark` 下注册 `rspec` 后发射 2 指令定长 `li32`。
+
+---
+
+### 4.32 RISC-V `jal` $\pm 1\text{MB}$ 跳转范围限制、多线程原子修补与 `NativeCallTrampolineStub` 桥接机制
+
+#### 1. 架构挑战：为什么 RISC-V 的 `NativeCall` 不能直接用 `auipc + jalr`（8 字节）？
+在 RISC-V 指令集中：
+- 单条无条件跳转并链接指令 `jal ra, offset`（J-type）具有 20 位有符号半字偏移，寻址范围仅为 **$\pm 1\text{MB}$**；
+- 而双指令组合 `auipc t0, hi20; jalr ra, t0, lo12` 虽然能覆盖 $\pm 2\text{GB}$ 的整个 `CodeCache`，但它占用了 **2 条 32 位指令（8 字节）**！
+
+在 HotSpot 中，编译代码中的方法调用点（Static Call、Opt Virtual Call、Virtual IC Call）会在多线程并发执行（不进入全局 Safepoint！）的情况下，由其他线程通过 `NativeCall::set_destination_mt_safe` 动态修改跳转目标（例如从 `resolve_static_call_stub` 切换到已编译目标方法入口或 `to_interp_stub`）。
+- 如果 `NativeCall` 由 2 条指令（`auipc + jalr`）组成，当线程 A 刚修改完第一条 `auipc`、尚未修改第二条 `jalr` 时，线程 B 恰好执行完旧的 `auipc` 并接着执行新的 `jalr`（**Tearing / 撕裂读**），会拼接出一个完全错误的随机目标地址并跳飞崩溃！
+- 在 AArch64 中，单条 `bl` 指令具有 26 位字偏移（$\pm 128\text{MB}$）；而在 RISC-V 中，为了保证调用点本身是**单条 32 位对齐指令（`NativeCall::instruction_size == 4`）**从而具备天然的 32 位写原子性，当 `ReservedCodeCacheSize > 1MB`（即 `MacroAssembler::far_branches() == true`）时，**几乎所有跨方法的编译调用都可能超出 `jal` 的 $\pm 1\text{MB}$ 范围**！
+
+#### 2. 完美解决方案：`NativeCall`（4B `jal`）+ `NativeCallTrampolineStub`（20B）双层原子修补架构
+我们在 [`macroAssembler_riscv.cpp:477-538`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L477-L538) 与 [`nativeInst_riscv.cpp:173-290`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.cpp#L173-L290) 中完整构建了 Trampoline 桥接体系：
+1. **编译期（`MacroAssembler::trampoline_call` & `emit_trampoline_stub`）**：
+   - 当 `far_branches()` 为真时，先在当前编译方法的 **Stub Section**（紧跟在方法主代码区之后，距离主代码区远小于 $1\text{MB}$！）分配一个 20 字节的 `NativeCallTrampolineStub`，并注册 `trampoline_stub_Relocation::spec(call_pc)` 将该 Stub 与主代码区的调用点绑定：
+     ```text
+     Stub Section (8 字节对齐, 20 字节):
+       +0: auipc t0, 0
+       +4: ld    t0, 12(t0)     // PC 相对加载 +12 处的 64 位目标地址
+       +8: jr    t0             // 跳转到 t0 (jalr zr, t0, 0)
+      +12: .dword <64-bit dest> // 8 字节对齐的 64 位目标地址槽位
+     ```
+   - 随后在主代码区的调用点发射单条 `jal(ra, 0)`（自跳占位符），并注册调用重定位（`runtime_call_type` / `static_call_type` / `virtual_call_type` 等）。
+2. **代码搬移与安装期（`CodeBuffer::relocate_code_to` $\rightarrow$ `Relocation::pd_set_call_destination`）**：
+   - 当 `CodeBuffer` 扩容或拷贝生成最终 `nmethod` 时，若目标地址 `dest` 距离调用点在 $\pm 1\text{MB}$ 以内，直接将调用点的 `jal` 修补为跳向 `dest`；
+   - 若超出 $\pm 1\text{MB}$，通过 `trampoline_stub_Relocation::get_trampoline_for` 找到配对的 `NativeCallTrampolineStub`，将 64 位 `dest` 写入 Stub 的 `+12` 数据槽位，并将调用点的 `jal` 修补为跳向本方法尾部的 `trampoline_stub`！
+3. **运行期并发修补（`NativeCall::set_destination_mt_safe`）**：
+   - 先原位原子更新 `NativeCallTrampolineStub` `+12` 处的 64 位目标地址并执行 `OrderAccess::release()`；
+   - 再根据新目标 `dest` 是否在 $\pm 1\text{MB}$ 内，用单次 32 位写操作将调用点的 `jal` 指令原子更新为直跳 `dest` 或跳向 `trampoline_stub_addr`，最后刷新 I-Cache。整个过程绝不会出现多指令撕裂！
+
+---
+
+### 4.33 JDK 8 vs JDK 19 在 `CompiledIC` / `CompiledStaticCall` 与 `NativeJump::patch_verified_entry` 上的四处接口鸿沟
+
+#### 1. 现象与编译/运行期隐患
+在将 JDK 19 的 `compiledIC_riscv.cpp`、`icBuffer_riscv.cpp` 与 `nativeInst_riscv.cpp` 迁回 JDK 8u 时，暴露出四处关键的跨版本接口与信号处理鸿沟：
+1. **鸿沟一：`CompiledDirectStaticCall` vs `CompiledStaticCall` 及 `cleanup_call_site` 的归属转移**：
+   - JDK 19 将静态调用拆分为独立的 `CompiledDirectStaticCall` 类，并将 `CompiledIC::cleanup_call_site` 与 `CompiledIC::is_icholder_call_site` 移入了平台无关的共享文件 `compiledIC.cpp`。
+   - 而在 **JDK 8u** 中，类名仍为 `CompiledStaticCall`（继承自 `NativeCall`），没有 `to_trampoline_stub_size()` 成员函数；且 [`compiledIC.hpp:197-198`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/code/compiledIC.hpp#L197-L198) 声明的 `CompiledIC::cleanup_call_site` 与 `is_icholder_call_site` **必须在各 CPU 后端的 `compiledIC_<arch>.cpp` 中提供定义**！此外，[`compiledIC.hpp:326`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/code/compiledIC.hpp#L326) 中原本仅对 `#if defined(AARCH64)` 开放了带 `address mark` 参数的 `emit_to_interp_stub(CodeBuffer &cbuf, address mark)` 重载，需将 `defined(RISCV)` 一并纳入。
+2. **鸿沟二：`NativeFenceI::instruction_size` 与 `ifence()` 发射字节数必须严格相等**：
+   - 在 `MacroAssembler::emit_static_call_stub()` 中，第一条指令是 `ifence()`，紧接着是 `mov_metadata(xmethod, NULL)`。而在 `CompiledStaticCall::set_to_interpreted` 中，定位 `method_holder` 的方式是硬编码偏移：`nativeMovConstReg_at(stub + NativeFenceI::instruction_size)`！
+   - 在 JDK 19 中，`ifence()` 被展开为 4 条指令（`1 + 3` 条，共 16 字节），因此 `NativeFenceI::instruction_size` 为 `16`；而在我们的实现中，`ifence()` 直接发射单条 `fence.i`（4 字节）。若误将 `NativeFenceI::instruction_size` 设为 `16`，`set_to_interpreted` 会直接跳过 `mov_metadata` 的前 3 条指令，指到第 4 条指令中间触发 `fatal("not a movptr...")`！因此必须将 `NativeFenceI::instruction_size` 严格定为 `1 * NativeInstruction::instruction_size`（4 字节）。
+3. **鸿沟三：`MacroAssembler::la_patchable` 对 `CodeCache` 外部 C++ 运行时函数地址的兼容性**：
+   - 在 JDK 19 的 `la_patchable` 中，只要 `rtype != relocInfo::none`，就断言 `assert(CodeCache::contains(dest.target()))` 并强制使用 32 位 PC 相对偏移（`auipc + jalr`）。
+   - 但在 JDK 8u 的解释器与 Stub 中，部分 `far_call` / `far_jump` 会直接传入位于 `libjvm.so` 共享库中的 C++ 函数地址（不在 `CodeCache` 内，且在 64 位地址空间或 QEMU 下与 `CodeCache` 的距离可能超过 $\pm 2\text{GB}$！）。因此我们在 [`macroAssembler_riscv.cpp:441-455`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L441-L455) 中增加了 `CodeCache::contains(dest.target()) && is_offset_in_range(dest.target() - pc(), 32)` 双重判定：在 `CodeCache` 内使用 2 指令 `auipc + jalr`（配合 `InlineCacheBuffer` 与 `NativeJump`），在 `CodeCache` 外自动平滑回退到 6 指令全地址 `movptr_with_offset + jalr`！
+4. **鸿沟四：`NativeJump::patch_verified_entry` 的非法指令码与 `os_linux_riscv.cpp` 信号处理器的契约对齐**：
+   - 当某个已编译方法失效（`make_not_entrant_or_zombie`）时，`NativeJump::patch_verified_entry` 会将方法入口 `verified_entry` 的第一条 4 字节指令原子替换为跳向 `SharedRuntime::get_handle_wrong_method_stub()` 的指令。
+   - 若距离超出 `jal` 的 $\pm 1\text{MB}$ 范围，无法用单条 4 字节跳转指令覆盖，此时必须写入一条 4 字节陷阱指令，交由 Linux 信号处理器拦截并重定向 PC 到 `get_handle_wrong_method_stub()`。
+   - 我们的 [`os_linux_riscv.cpp:293-297`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.cpp#L293-L297) 拦截的是 `sig == SIGILL && nativeInstruction_at(pc)->is_sigill_zombie_not_entrant()`（对应编码 `0xffffffff`，即 `NativeIllegalInstruction::instruction_code`）。因此 `patch_verified_entry` 必须写入 `0xffffffff`（触发 `SIGILL`），而绝不能写入 `ebreak`（触发 `SIGTRAP`），从而与信号处理器形成 100% 闭环。
+
 
 如果未来要在 OpenJDK 8u 中移植另一个全新的指令集架构（如某个专有 ASIC、DSP 或新一代开放架构），可直接按照本工程总结的核对清单推进 Phase 1：
 

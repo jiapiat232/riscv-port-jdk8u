@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 1998, 2020, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2014, 2020, Red Hat Inc. All rights reserved.
  * Copyright (c) 2020, 2022, Huawei Technologies Co., Ltd. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -32,34 +32,82 @@
 #include "runtime/safepoint.hpp"
 
 void Relocation::pd_set_data_value(address x, intptr_t o, bool verify_only) {
-  if (verify_only) {
-    return;
+  int bytes;
+
+  switch (type()) {
+    case relocInfo::oop_type: {
+      oop_Relocation *reloc = (oop_Relocation *)this;
+      // Embedded oop in constant pool (auipc + ld)
+      if (NativeInstruction::is_load_pc_relative_at(addr())) {
+        address constptr = (address)code()->oop_addr_at(reloc->oop_index());
+        bytes = MacroAssembler::pd_patch_instruction_size(addr(), constptr);
+        assert(*(address*)constptr == x, "error in oop relocation");
+      } else {
+        bytes = MacroAssembler::patch_oop(addr(), x);
+      }
+      break;
+    }
+    default:
+      bytes = MacroAssembler::pd_patch_instruction_size(addr(), x + o);
+      break;
   }
-  MacroAssembler::pd_patch_instruction(addr(), x);
-  ICache::invalidate_range(addr(), NativeInstruction::instruction_size);
+  ICache::invalidate_range(addr(), bytes);
 }
 
 address Relocation::pd_call_destination(address orig_addr) {
-  return addr();
+  assert(is_call(), "should be a call here");
+  if (NativeCall::is_call_at(addr())) {
+    address trampoline = nativeCall_at(addr())->get_trampoline();
+    if (trampoline != NULL) {
+      return nativeCallTrampolineStub_at(trampoline)->destination();
+    }
+  }
+  if (orig_addr != NULL) {
+    address new_addr = MacroAssembler::pd_call_destination(orig_addr);
+    // If call is branch to self, don't try to relocate it, just leave it
+    // as branch to self. This happens during code generation if the code
+    // buffer expands. It will be relocated to the trampoline above once
+    // code generation is complete.
+    new_addr = (new_addr == orig_addr) ? addr() : new_addr;
+    return new_addr;
+  }
+  return MacroAssembler::pd_call_destination(addr());
 }
 
 void Relocation::pd_set_call_destination(address x) {
-  MacroAssembler::pd_patch_instruction(addr(), x);
-  ICache::invalidate_range(addr(), NativeInstruction::instruction_size);
+  assert(is_call(), "should be a call here");
+  if (NativeCall::is_call_at(addr())) {
+    address trampoline = nativeCall_at(addr())->get_trampoline();
+    if (trampoline != NULL) {
+      nativeCall_at(addr())->set_destination_mt_safe(x, /* assert_lock */false);
+      return;
+    }
+  }
+  MacroAssembler::pd_patch_instruction_size(addr(), x);
+  address pd_call = pd_call_destination(addr());
+  assert(pd_call == x, "fail in reloc");
 }
 
 address* Relocation::pd_address_in_code() {
-  return (address*)addr();
+  return (address*)MacroAssembler::target_addr_for_insn(addr());
 }
 
 address Relocation::pd_get_address_from_code() {
-  return addr();
+  return MacroAssembler::pd_call_destination(addr());
 }
 
 void poll_Relocation::fix_relocation_after_move(const CodeBuffer* src, CodeBuffer* dest) {
+  if (NativeInstruction::maybe_cpool_ref(addr())) {
+    address old_addr = old_addr_for(addr(), src, dest);
+    MacroAssembler::pd_patch_instruction_size(addr(), MacroAssembler::target_addr_for_insn(old_addr));
+  }
 }
 
 void poll_return_Relocation::fix_relocation_after_move(const CodeBuffer* src, CodeBuffer* dest) {
+  if (NativeInstruction::maybe_cpool_ref(addr())) {
+    address old_addr = old_addr_for(addr(), src, dest);
+    MacroAssembler::pd_patch_instruction_size(addr(), MacroAssembler::target_addr_for_insn(old_addr));
+  }
 }
 
 void metadata_Relocation::pd_fix_value(address x) {

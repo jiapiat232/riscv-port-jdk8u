@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, Red Hat Inc. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2020, Red Hat Inc. All rights reserved.
  * Copyright (c) 2020, 2022, Huawei Technologies Co., Ltd. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -26,7 +26,6 @@
 
 #include "precompiled.hpp"
 #include "asm/macroAssembler.hpp"
-#include "asm/macroAssembler.inline.hpp"
 #include "code/icBuffer.hpp"
 #include "gc_interface/collectedHeap.inline.hpp"
 #include "interpreter/bytecodes.hpp"
@@ -35,29 +34,42 @@
 #include "oops/oop.inline.hpp"
 
 int InlineCacheBuffer::ic_stub_code_size() {
-  return 8 * NativeInstruction::instruction_size;
+  // Layout:
+  //   ld(xmethod, l)                  : 2 instructions (auipc + ld = 8 bytes)
+  //   far_jump(entry_point)           : 2 instructions if far_branches() (auipc + jalr = 8 bytes),
+  //                                     1 instruction if !far_branches() (jal = 4 bytes) + 1 nop (align)
+  //   align(wordSize)
+  //   l: .dword cached_value          : 2 instructions (8 bytes)
+  // Total = 6 * 4 = 24 bytes.
+  return 6 * NativeInstruction::instruction_size;
 }
 
 #define __ masm->
 
 void InlineCacheBuffer::assemble_ic_buffer_code(address code_begin, void* cached_value, address entry_point) {
-  assert(code_begin != NULL && entry_point != NULL, "sanity");
   ResourceMark rm;
-  CodeBuffer code(code_begin, ic_stub_code_size());
-  MacroAssembler* masm = new MacroAssembler(&code);
-
-  __ movptr(t1, (intptr_t)cached_value);
+  CodeBuffer      code(code_begin, ic_stub_code_size());
+  MacroAssembler* masm            = new MacroAssembler(&code);
+  // Note: even though the code contains an embedded value, we do not need reloc info
+  // because the value is unchanged over the lifetime of the stub.
+  Label l;
+  __ ld(xmethod, l);
   __ far_jump(ExternalAddress(entry_point));
+  __ align(wordSize);
+  __ bind(l);
+  __ emit_int64((intptr_t)cached_value);
   ICache::invalidate_range(code_begin, InlineCacheBuffer::ic_stub_code_size());
 }
 
 address InlineCacheBuffer::ic_buffer_entry_point(address code_begin) {
-  NativeMovConstReg* move = nativeMovConstReg_at(code_begin);
+  NativeMovConstReg* move = nativeMovConstReg_at(code_begin);   // creation also verifies the object
   NativeJump* jump = nativeJump_at(move->next_instruction_address());
   return jump->jump_destination();
 }
 
 void* InlineCacheBuffer::ic_buffer_cached_value(address code_begin) {
-  NativeMovConstReg* move = nativeMovConstReg_at(code_begin);
-  return (void*)move->data();
+  // The word containing the cached value is at the end of this IC buffer.
+  uintptr_t *p = (uintptr_t *)(code_begin + ic_stub_code_size() - wordSize);
+  void* o = (void*)*p;
+  return o;
 }

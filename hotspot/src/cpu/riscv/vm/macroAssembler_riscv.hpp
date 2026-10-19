@@ -41,8 +41,8 @@ class MacroAssembler: public Assembler {
 
   MacroAssembler(CodeBuffer* code) : Assembler(code) {}
 
-  void align(int modulus) {
-    while (offset() % modulus != 0) {
+  void align(int modulus, int extra_offset = 0) {
+    while ((offset() + extra_offset) % modulus != 0) {
       nop();
     }
   }
@@ -55,18 +55,50 @@ class MacroAssembler: public Assembler {
     Assembler::mv(dst, src);
   }
 
+  // Fixed-length 6-instruction (24-byte) patchable pointer load:
+  //   movptr_with_offset (5 insns: lui + addi + slli(11) + addi + slli(6)) + addi
   void movptr_with_offset(Register Rd, address addr, int32_t &offset);
   void movptr(Register dst, intptr_t val);
-  void li(Register rd, intptr_t imm) { movptr(rd, imm); }
+
+  // Variable-length (1..6 insns) unpatchable immediate load:
+  void li(Register rd, intptr_t imm);
   void mv(Register rd, int64_t imm) { li(rd, imm); }
   void mv(Register rd, address addr) { movptr(rd, (intptr_t)addr); }
+  void mv(Register rd, Address dest);
+  void mv(Register rd, RegisterOrConstant src) {
+    if (src.is_register()) {
+      mv(rd, src.as_register());
+    } else {
+      li(rd, src.as_constant());
+    }
+  }
+
   void mov_metadata(Register dst, Metadata* obj);
-  void movoop(Register dst, jobject obj);
+  void movoop(Register dst, jobject obj, bool immediate = true);
+  void set_narrow_oop(Register dst, jobject obj);
+  void set_narrow_klass(Register dst, Klass* k);
 
   // -------------------------------------------------------------
   // Memory Operations with Address
   // -------------------------------------------------------------
+  using Assembler::ld;
+  using Assembler::sd;
+  using Assembler::lw;
+  using Assembler::sw;
+  using Assembler::lh;
+  using Assembler::sh;
+  using Assembler::lb;
+  using Assembler::sb;
+  using Assembler::lbu;
+  using Assembler::lhu;
+  using Assembler::lwu;
+  using Assembler::fld;
+  using Assembler::fsd;
+  using Assembler::flw;
+  using Assembler::fsw;
+
   void ld(Register dst, Address adr);
+  void ld(Register dst, Label& L);
   void sd(Register src, Address adr);
   void lw(Register dst, Address adr);
   void sw(Register src, Address adr);
@@ -88,13 +120,14 @@ class MacroAssembler: public Assembler {
   // -------------------------------------------------------------
   void build_frame(int framesize);
   void remove_frame(int framesize);
-  void load_unsigned_byte(Register dst, Address src) { lbu(dst, src); }
-  void load_signed_byte(Register dst, Address src)   { lb(dst, src); }
-  void load_unsigned_short(Register dst, Address src){ lhu(dst, src); }
-  void load_signed_short(Register dst, Address src)  { lh(dst, src); }
+  int load_unsigned_byte(Register dst, Address src)  { int off = offset(); lbu(dst, src); return off; }
+  int load_signed_byte(Register dst, Address src)    { int off = offset(); lb(dst, src);  return off; }
+  int load_unsigned_short(Register dst, Address src) { int off = offset(); lhu(dst, src); return off; }
+  int load_signed_short(Register dst, Address src)   { int off = offset(); lh(dst, src);  return off; }
   void load_sized_value(Register dst, Address src, size_t size_in_bytes, bool is_signed);
 
   virtual void bang_stack_with_offset(int offset);
+  void bang_stack_size(Register size, Register tmp);
 
   void push(Register r);
   void pop(Register r);
@@ -113,11 +146,26 @@ class MacroAssembler: public Assembler {
   // -------------------------------------------------------------
   // Calls and Jumps
   // -------------------------------------------------------------
+  static bool far_branches() {
+    return ReservedCodeCacheSize > branch_range;
+  }
+
+  static int far_branch_size() {
+    return far_branches() ? (2 * instruction_size) : instruction_size;
+  }
+
   void call(address entry);
   void jmp(address entry);
   void far_jump(address entry) { jmp(entry); }
   void far_jump(const Address& entry, Register tmp = t0);
   void far_call(const Address& entry, Register tmp = t0);
+  void la_patchable(Register reg1, const Address& dest, int32_t& offset);
+
+  address trampoline_call(Address entry, CodeBuffer* cbuf = NULL);
+  address ic_call(address entry, jint method_index = 0);
+  address emit_trampoline_stub(int insts_call_instruction_offset, address target);
+  void emit_static_call_stub();
+  static int static_call_stub_size();
 
   void la(Register Rd, const Address& adr);
   void la(Register Rd, const address addr);
@@ -159,12 +207,23 @@ class MacroAssembler: public Assembler {
   void j(address entry, Register tmp = t0)        { far_jump(entry); }
   void jal(Register rd, Label& L);
 
-  static void pd_patch_instruction(address branch, address target);
+  static address target_addr_for_insn(address insn_addr);
+  static int pd_patch_instruction_size(address branch, address target);
+  static void pd_patch_instruction(address branch, address target) {
+    pd_patch_instruction_size(branch, target);
+  }
+  static address pd_call_destination(address branch) {
+    return target_addr_for_insn(branch);
+  }
+  static int patch_oop(address insn_addr, address o);
 
   // -------------------------------------------------------------
   // Safepoints, GC and Thread State
   // -------------------------------------------------------------
   void safepoint_poll(Register tmp);
+  void get_polling_page(Register dest, address page, relocInfo::relocType rtype);
+  address read_polling_page(Register r, address page, relocInfo::relocType rtype);
+  address read_polling_page(Register r, relocInfo::relocType rtype);
   void reinit_heapbase();
   void load_byte_map_base(Register dst);
   void get_thread(Register dst) {
@@ -192,8 +251,33 @@ class MacroAssembler: public Assembler {
 
   void membar(uint32_t order_constraint);
 
+  static void membar_mask_to_pred_succ(uint32_t order_constraint, uint32_t& predecessor, uint32_t& successor) {
+    predecessor = (order_constraint >> 2) & 0x3;
+    successor = order_constraint & 0x3;
+    if (UseConservativeFence) {
+      predecessor |= predecessor << 2;
+      successor |= successor << 2;
+    }
+  }
+
+  static int pred_succ_to_membar_mask(uint32_t predecessor, uint32_t successor) {
+    return ((predecessor & 0x3) << 2) | (successor & 0x3);
+  }
+
+  static bool is_valid_riscv64_address(address addr) {
+    return ((uintptr_t)addr >> 47) == 0;
+  }
+
+  void ld_constant(Register dest, const Address &const_addr) {
+    int32_t offset = 0;
+    la_patchable(dest, InternalAddress(const_addr.target()), offset);
+    Assembler::ld(dest, dest, offset);
+  }
+
   void zext(Register dst, Register src, int bits);
   void sext(Register dst, Register src, int bits);
+  void zero_extend(Register dst, Register src, int bits) { zext(dst, src, bits); }
+  void sign_extend(Register dst, Register src, int bits) { sext(dst, src, bits); }
   void c2bool(Register Rd, Register Rs) { sltu(Rd, zr, Rs); }
   void c2bool(Register Rd) { c2bool(Rd, Rd); }
   void cast_primitive_type(BasicType type, Register Rt);
