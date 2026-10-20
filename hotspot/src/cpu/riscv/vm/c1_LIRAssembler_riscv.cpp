@@ -50,7 +50,7 @@
 #endif
 
 NEEDS_CLEANUP // remove this definitions ?
-const Register IC_Klass    = t1;   // where the IC klass is cached
+const Register IC_Klass    = xmethod; // where the IC klass is cached
 const Register SYNC_header = x10;  // synchronization header
 const Register SHIFT_count = x10;  // where count for shift operations must be
 
@@ -1061,7 +1061,12 @@ void LIR_Assembler::emit_op3(LIR_Op3* op) {
   switch (op->code()) {
     case lir_idiv:
     case lir_irem:
-      arithmetic_idiv(op, op->code() == lir_irem);
+      arithmetic_idiv(op->code(),
+                      op->in_opr1(),
+                      op->in_opr2(),
+                      op->in_opr3(),
+                      op->result_opr(),
+                      op->info());
       break;
     default:
       ShouldNotReachHere();
@@ -1330,13 +1335,13 @@ void LIR_Assembler::typecheck_helper_slowcheck(ciKlass* k, Register obj, Registe
       __ beq(klass_RInfo, k_RInfo, *success_target, /* is_far */ true);
 
       __ subi(sp, sp, 2 * wordSize);
-      __ sd(k_RInfo, Address(sp, wordSize));
-      __ sd(klass_RInfo, Address(sp, 0));
+      __ sd(klass_RInfo, Address(sp, wordSize));
+      __ sd(k_RInfo, Address(sp, 0));
       __ far_call(RuntimeAddress(Runtime1::entry_for(Runtime1::slow_subtype_check_id)));
-      __ ld(klass_RInfo, Address(sp, 0));
+      __ ld(k_RInfo, Address(sp, 0));
       __ addi(sp, sp, 2 * wordSize);
       // result is a boolean
-      __ beqz(klass_RInfo, *failure_target, /* is_far */ true);
+      __ beqz(k_RInfo, *failure_target, /* is_far */ true);
       // successful cast, fall through to profile or jump
     }
   } else {
@@ -1344,11 +1349,10 @@ void LIR_Assembler::typecheck_helper_slowcheck(ciKlass* k, Register obj, Registe
     __ check_klass_subtype_fast_path(klass_RInfo, k_RInfo, Rtmp1, success_target, failure_target, NULL);
     // call out-of-line instance of __ check_klass_subtype_slow_path(...):
     __ subi(sp, sp, 2 * wordSize);
-    __ sd(k_RInfo, Address(sp, wordSize));
-    __ sd(klass_RInfo, Address(sp, 0));
+    __ sd(klass_RInfo, Address(sp, wordSize));
+    __ sd(k_RInfo, Address(sp, 0));
     __ far_call(RuntimeAddress(Runtime1::entry_for(Runtime1::slow_subtype_check_id)));
     __ ld(k_RInfo, Address(sp, 0));
-    __ ld(klass_RInfo, Address(sp, wordSize));
     __ addi(sp, sp, 2 * wordSize);
     // result is a boolean
     __ beqz(k_RInfo, *failure_target, /* is_far */ true);
@@ -1518,11 +1522,10 @@ void LIR_Assembler::lir_store_slowcheck(Register k_RInfo, Register klass_RInfo, 
   __ check_klass_subtype_fast_path(klass_RInfo, k_RInfo, Rtmp1, success_target, failure_target, NULL);
   // call out-of-line instance of __ check_klass_subtype_slow_path(...):
   __ subi(sp, sp, 2 * wordSize);
-  __ sd(k_RInfo, Address(sp, wordSize));
-  __ sd(klass_RInfo, Address(sp, 0));
+  __ sd(klass_RInfo, Address(sp, wordSize));
+  __ sd(k_RInfo, Address(sp, 0));
   __ far_call(RuntimeAddress(Runtime1::entry_for(Runtime1::slow_subtype_check_id)));
   __ ld(k_RInfo, Address(sp, 0));
-  __ ld(klass_RInfo, Address(sp, wordSize));
   __ addi(sp, sp, 2 * wordSize);
   // result is a boolean
   __ beqz(k_RInfo, *failure_target, /* is_far */ true);
@@ -1560,15 +1563,24 @@ void LIR_Assembler::emit_opTypeCheck(LIR_OpTypeCheck* op) {
 }
 
 void LIR_Assembler::casw(Register addr, Register newval, Register cmpval) {
-  __ cmpxchg(addr, cmpval, newval, Assembler::int32, Assembler::aq, Assembler::rl, t1);
+  __ cmpxchg(addr, cmpval, newval, Assembler::int32, Assembler::aq /* acquire */,
+             Assembler::rl /* release */, t0, true /* result as bool */);
+  __ seqz(t0, t0); // cmpxchg not equal, set t0 to 1
+  __ membar(MacroAssembler::AnyAny);
 }
 
 void LIR_Assembler::caswu(Register addr, Register newval, Register cmpval) {
-  __ cmpxchg(addr, cmpval, newval, Assembler::uint32, Assembler::aq, Assembler::rl, t1);
+  __ cmpxchg(addr, cmpval, newval, Assembler::uint32, Assembler::aq /* acquire */,
+             Assembler::rl /* release */, t0, true /* result as bool */);
+  __ seqz(t0, t0); // cmpxchg not equal, set t0 to 1
+  __ membar(MacroAssembler::AnyAny);
 }
 
 void LIR_Assembler::casl(Register addr, Register newval, Register cmpval) {
-  __ cmpxchg(addr, cmpval, newval, Assembler::int64, Assembler::aq, Assembler::rl, t1);
+  __ cmpxchg(addr, cmpval, newval, Assembler::int64, Assembler::aq /* acquire */,
+             Assembler::rl /* release */, t0, true /* result as bool */);
+  __ seqz(t0, t0); // cmpxchg not equal, set t0 to 1
+  __ membar(MacroAssembler::AnyAny);
 }
 
 void LIR_Assembler::emit_compare_and_swap(LIR_OpCompareAndSwap* op) {
@@ -1579,12 +1591,12 @@ void LIR_Assembler::emit_compare_and_swap(LIR_OpCompareAndSwap* op) {
 
   if (op->code() == lir_cas_obj) {
     if (UseCompressedOops) {
-      Register t1 = op->tmp1()->as_register();
+      Register tmp1 = op->tmp1()->as_register();
       assert(op->tmp1()->is_valid(), "must be");
-      __ encode_heap_oop(t1, cmpval);
-      cmpval = t1;
-      __ encode_heap_oop(t0, newval);
-      newval = t0;
+      __ encode_heap_oop(tmp1, cmpval);
+      cmpval = tmp1;
+      __ encode_heap_oop(t1, newval);
+      newval = t1;
       caswu(addr, newval, cmpval);
     } else {
       casl(addr, newval, cmpval);
@@ -1593,20 +1605,6 @@ void LIR_Assembler::emit_compare_and_swap(LIR_OpCompareAndSwap* op) {
     casw(addr, newval, cmpval);
   } else {
     casl(addr, newval, cmpval);
-  }
-}
-
-static LIR_Condition negate_cond(LIR_Condition cond) {
-  switch (cond) {
-    case lir_cond_equal:        return lir_cond_notEqual;
-    case lir_cond_notEqual:     return lir_cond_equal;
-    case lir_cond_less:         return lir_cond_greaterEqual;
-    case lir_cond_lessEqual:    return lir_cond_greater;
-    case lir_cond_greaterEqual: return lir_cond_less;
-    case lir_cond_greater:      return lir_cond_lessEqual;
-    case lir_cond_belowEqual:   return lir_cond_aboveEqual;
-    case lir_cond_aboveEqual:   return lir_cond_belowEqual;
-    default: ShouldNotReachHere(); return lir_cond_always;
   }
 }
 
@@ -1619,32 +1617,14 @@ void LIR_Assembler::cmove(LIR_Condition condition, LIR_Opr opr1, LIR_Opr opr2, L
   assert(cmp_opr1->is_valid() && cmp_opr2->is_valid(), "expect valid cmp operands for cmove on riscv");
   assert(condition != lir_cond_always, "must be");
 
-  Label l_done;
-  if (opr1 == opr2) {
-    move_op(opr1, result, type, lir_patch_none, NULL, /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
-  } else if (opr1 == result) {
-    emit_branch(condition, cmp_opr1, cmp_opr2, l_done, /* is_far */ false, /* is_unordered */ false);
-    move_op(opr2, result, type, lir_patch_none, NULL, /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
-  } else if (opr2 == result) {
-    // Should not change cmp_opr1 & cmp_opr2 during move_op, just in case.
-    assert_different_registers(opr1->is_register() ? as_reg(opr1) : noreg,
-                               cmp_opr1->is_register() ? as_reg(cmp_opr1) : noreg);
-    assert_different_registers(opr1->is_register() ? as_reg(opr1) : noreg,
-                               cmp_opr2->is_register() ? as_reg(cmp_opr2) : noreg);
-    move_op(opr1, result, type, lir_patch_none, NULL, /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
-    emit_branch(condition, cmp_opr1, cmp_opr2, l_done, /* is_far */ false, /* is_unordered */ false);
-    move_op(opr2, result, type, lir_patch_none, NULL, /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
-  } else {
-    // Should not change cmp_opr1 & cmp_opr2 during move_op, just in case.
-    assert_different_registers(result->is_register() ? as_reg(result) : noreg,
-                               cmp_opr1->is_register() ? as_reg(cmp_opr1) : noreg);
-    assert_different_registers(result->is_register() ? as_reg(result) : noreg,
-                               cmp_opr2->is_register() ? as_reg(cmp_opr2) : noreg);
-    move_op(opr2, result, type, lir_patch_none, NULL, /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
-    emit_branch(negate_cond(condition), cmp_opr1, cmp_opr2, l_done, /* is_far */ false, /* is_unordered */ false);
-    move_op(opr1, result, type, lir_patch_none, NULL, /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
-  }
-  __ bind(l_done);
+  Label label, done;
+  emit_branch(condition, cmp_opr1, cmp_opr2, label, /* is_far */ false,
+              /* is_unordered */ (condition == lir_cond_greaterEqual || condition == lir_cond_greater) ? false : true);
+  move_op(opr2, result, type, lir_patch_none, NULL, /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
+  __ j(done);
+  __ bind(label);
+  move_op(opr1, result, type, lir_patch_none, NULL, /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
+  __ bind(done);
 }
 
 void LIR_Assembler::logic_op_reg32(Register dst, Register left, Register right, LIR_Code code) {
@@ -2384,21 +2364,55 @@ void LIR_Assembler::atomic_op(LIR_Code code, LIR_Opr src, LIR_Opr data, LIR_Opr 
 // ----------------------------------------------------------------------------
 
 void LIR_Assembler::arithmetic_idiv(LIR_Code code, LIR_Opr left, LIR_Opr right, LIR_Opr temp, LIR_Opr result, CodeEmitInfo* info) {
-  Unimplemented();
+  assert((code == lir_idiv) || (code == lir_irem), "opcode must be idiv or irem");
+  bool is_irem = (code == lir_irem);
+  assert(left->is_single_cpu(), "left must be a register");
+  assert(right->is_single_cpu() || right->is_constant(), "right must be a register or constant");
+  assert(result->is_single_cpu(), "result must be a register");
+  Register lreg = left->as_register();
+  Register dreg = result->as_register();
+
+  if (right->is_constant()) {
+    int c = right->as_constant_ptr()->as_jint();
+    assert(c > 0 && is_power_of_2(c), "divisor must be power-of-2 constant");
+    if (is_irem) {
+      if (c == 1) {
+        __ mv(dreg, zr);
+      } else {
+        unsigned int shift = exact_log2(c);
+        __ sraiw(t0, lreg, 0x1f);
+        __ srliw(t0, t0, BitsPerInt - shift);
+        __ addw(t1, lreg, t0);
+        if (Assembler::is_simm12(c - 1)) {
+          __ andi(t1, t1, c - 1);
+        } else {
+          __ zext(t1, t1, shift);
+        }
+        __ subw(dreg, t1, t0);
+      }
+    } else {
+      if (c == 1) {
+        __ mv(dreg, lreg);
+      } else {
+        unsigned int shift = exact_log2(c);
+        __ sraiw(t0, lreg, 0x1f);
+        if (Assembler::is_simm12(c - 1)) {
+          __ andi(t0, t0, c - 1);
+        } else {
+          __ zext(t0, t0, shift);
+        }
+        __ addw(dreg, t0, lreg);
+        __ sraiw(dreg, dreg, shift);
+      }
+    }
+  } else {
+    Register rreg = right->as_register();
+    __ corrected_idivl(dreg, lreg, rreg, is_irem);
+  }
 }
 
 void LIR_Assembler::arithmetic_idiv(LIR_Op3* op, bool is_irem) {
-  Register Rdividend = op->in_opr1()->as_register();
-  Register Rdivisor  = op->in_opr2()->as_register();
-  Register Rscratch  = op->in_opr3()->as_register();
-  Register Rresult   = op->result_opr()->as_register();
-  int divisor = -1;
-
-  if (Rdivisor == noreg && is_power_of_2(divisor)) {
-    // convert division by a power of two into some shifts and logical operations
-  }
-
-  __ corrected_idivl(Rresult, Rdividend, Rdivisor, is_irem);
+  arithmetic_idiv(op->code(), op->in_opr1(), op->in_opr2(), op->in_opr3(), op->result_opr(), op->info());
 }
 
 void LIR_Assembler::arith_op_single_cpu_right_constant(LIR_Code code, LIR_Opr left, LIR_Opr right,
@@ -2493,16 +2507,53 @@ void LIR_Assembler::arith_op_double_cpu(LIR_Code code, LIR_Opr left, LIR_Opr rig
     }
 
   } else if (right->is_constant()) {
-    jlong c = right->as_constant_ptr()->as_jlong_bits();
+    jlong c = right->as_constant_ptr()->as_jlong();
     Register dreg = as_reg(dest);
-    assert(code == lir_add || code == lir_sub, "mismatched arithmetic op");
-    if (c == 0 && dreg == lreg_lo) {
-      COMMENT("effective nop elided");
-      return;
-    }
     switch (code) {
-      case lir_add: __ add(dreg, lreg_lo, c); break;
-      case lir_sub: __ sub(dreg, lreg_lo, c); break;
+      case lir_add: // fall through
+      case lir_sub:
+        if (c == 0 && dreg == lreg_lo) {
+          COMMENT("effective nop elided");
+          return;
+        }
+        code == lir_add ? __ add(dreg, lreg_lo, c) : __ sub(dreg, lreg_lo, c);
+        break;
+      case lir_div:
+        assert(c > 0 && is_power_of_2_long(c), "divisor must be power-of-2 constant");
+        if (c == 1) {
+          // move lreg_lo to dreg if divisor is 1
+          __ mv(dreg, lreg_lo);
+        } else {
+          unsigned int shift = exact_log2_long(c);
+          // use t0 as intermediate result register
+          __ srai(t0, lreg_lo, 0x3f);
+          if (Assembler::is_simm12(c - 1)) {
+            __ andi(t0, t0, c - 1);
+          } else {
+            __ zext(t0, t0, shift);
+          }
+          __ add(dreg, t0, lreg_lo);
+          __ srai(dreg, dreg, shift);
+        }
+        break;
+      case lir_rem:
+        assert(c > 0 && is_power_of_2_long(c), "divisor must be power-of-2 constant");
+        if (c == 1) {
+          // move 0 to dreg if divisor is 1
+          __ mv(dreg, zr);
+        } else {
+          unsigned int shift = exact_log2_long(c);
+          __ srai(t0, lreg_lo, 0x3f);
+          __ srli(t0, t0, BitsPerLong - shift);
+          __ add(t1, lreg_lo, t0);
+          if (Assembler::is_simm12(c - 1)) {
+            __ andi(t1, t1, c - 1);
+          } else {
+            __ zext(t1, t1, shift);
+          }
+          __ sub(dreg, t1, t0);
+        }
+        break;
       default:
         ShouldNotReachHere();
     }
@@ -2676,13 +2727,13 @@ void LIR_Assembler::arraycopy_simple_check(Register src, Register src_pos, Regis
   if (flags & LIR_OpArrayCopy::type_check) {
     if (!(flags & LIR_OpArrayCopy::LIR_OpArrayCopy::dst_objarray)) {
       __ load_klass(tmp, dst);
-      __ lwu(t0, Address(tmp, in_bytes(Klass::layout_helper_offset())));
+      __ lw(t0, Address(tmp, in_bytes(Klass::layout_helper_offset())));
       __ mvw(t1, Klass::_lh_neutral_value);
       __ bge(t0, t1, *stub->entry(), /* is_far */ true);
     }
     if (!(flags & LIR_OpArrayCopy::LIR_OpArrayCopy::src_objarray)) {
       __ load_klass(tmp, src);
-      __ lwu(t0, Address(tmp, in_bytes(Klass::layout_helper_offset())));
+      __ lw(t0, Address(tmp, in_bytes(Klass::layout_helper_offset())));
       __ mvw(t1, Klass::_lh_neutral_value);
       __ bge(t0, t1, *stub->entry(), /* is_far */ true);
     }
@@ -2714,9 +2765,12 @@ void LIR_Assembler::arraycopy_simple_check(Register src, Register src_pos, Regis
     __ bltu(tmp, t0, *stub->entry(), /* is_far */ true);
   }
 
-  if (flags & LIR_OpArrayCopy::length_positive_check) {
-    __ beqz(length, *stub->continuation(), /* is_far */ true);
-  }
+  // In JDK 8u, StubRoutines::*_arraycopy stubs require count != 0 (whereas
+  // LIRGenerator::arraycopy_helper may clear length_positive_check if length
+  // comes from an arraylength). Always skip the copy when length == 0,
+  // matching AArch64 JDK 8u (c1_LIRAssembler_aarch64.cpp:2381).
+  __ sext_w(t0, length);
+  __ beqz(t0, *stub->continuation(), /* is_far */ true);
 }
 
 void LIR_Assembler::arraycopy_checkcast_prepare_params(Register src, Register src_pos, Register length,
@@ -2740,7 +2794,7 @@ void LIR_Assembler::arraycopy_checkcast(Register src, Register src_pos, Register
                                         address copyfunc_addr, int flags) {
   // Stub is not generated if AvoidObjectCopy is true
   if (copyfunc_addr != NULL) {
-    // src is not aglobal a subklass of dst so we have to do a
+    // src is not a sub class of dst so we have to do a
     // per-element check.
     int mask = LIR_OpArrayCopy::src_objarray|LIR_OpArrayCopy::dst_objarray;
     if ((flags & mask) != mask) {
@@ -2755,10 +2809,9 @@ void LIR_Assembler::arraycopy_checkcast(Register src, Register src_pos, Register
       int lh_offset = in_bytes(Klass::layout_helper_offset());
       Address klass_lh_addr(tmp, lh_offset);
       jint objArray_lh = Klass::array_layout_helper(T_OBJECT);
-      __ lwu(t0, klass_lh_addr);
+      __ lw(t0, klass_lh_addr);
       __ mvw(t1, objArray_lh);
-      __ xorr(t0, t0, t1);
-      __ bnez(t0, *stub->entry(), /* is_far */ true);
+      __ bne(t0, t1, *stub->entry(), /* is_far */ true);
     }
 
     // Spill because stubs can use any register they like and it's
@@ -2836,7 +2889,7 @@ void LIR_Assembler::arraycopy_type_check(Register src, Register src_pos, Registe
       __ far_call(RuntimeAddress(Runtime1::entry_for(Runtime1::slow_subtype_check_id)));
       POP(src, dst);
 
-      __ bnez(src, cont);
+      __ bnez(dst, cont);
 
       __ bind(slow);
       POP(src, dst);

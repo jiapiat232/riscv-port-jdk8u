@@ -146,7 +146,10 @@ bool NativeInstruction::is_movptr_at(address branch) {
   uint32_t f5  = extract_funct3(i5);
   bool valid_i5 = (op5 == 0b0010011 && f5 == 0b000) || // addi
                   (op5 == 0b1100111 && f5 == 0b000) || // jalr
-                  (op5 == 0b0000011);                  // any load (lb/lh/lw/ld/lbu/lhu/lwu)
+                  (op5 == 0b0000011)                || // any load (lb/lh/lw/ld/lbu/lhu/lwu)
+                  (op5 == 0b0100011)                || // any store (sb/sh/sw/sd)
+                  (op5 == 0b0000111 && (f5 == 0b010 || f5 == 0b011)) || // flw/fld
+                  (op5 == 0b0100111 && (f5 == 0b010 || f5 == 0b011));   // fsw/fsd
   if (!valid_i5) return false;
 
   Register rd = extract_rd(i0);

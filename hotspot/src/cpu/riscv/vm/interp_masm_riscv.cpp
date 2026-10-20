@@ -126,17 +126,19 @@ void InterpreterMacroAssembler::push_ptr(Register r) {
 
 void InterpreterMacroAssembler::push_i(Register r) {
   addi(esp, esp, -wordSize);
+  addw(r, r, zr); // sign-extend 32-bit int to 64 bits
   sd(r, Address(esp, 0));
 }
 
 void InterpreterMacroAssembler::push_l(Register r) {
   addi(esp, esp, 2 * -wordSize);
+  sd(zr, Address(esp, wordSize));
   sd(r, Address(esp, 0));
 }
 
 void InterpreterMacroAssembler::push_f(FloatRegister r) {
   addi(esp, esp, -wordSize);
-  fsd(r, Address(esp, 0));
+  fsw(r, Address(esp, 0));
 }
 
 void InterpreterMacroAssembler::push_d(FloatRegister r) {
@@ -150,7 +152,7 @@ void InterpreterMacroAssembler::pop_ptr(Register r) {
 }
 
 void InterpreterMacroAssembler::pop_i(Register r) {
-  ld(r, Address(esp, 0));
+  lw(r, Address(esp, 0)); // lw sign-extends 32-bit int to 64 bits
   addi(esp, esp, wordSize);
 }
 
@@ -160,7 +162,7 @@ void InterpreterMacroAssembler::pop_l(Register r) {
 }
 
 void InterpreterMacroAssembler::pop_f(FloatRegister r) {
-  fld(r, Address(esp, 0));
+  flw(r, Address(esp, 0));
   addi(esp, esp, wordSize);
 }
 

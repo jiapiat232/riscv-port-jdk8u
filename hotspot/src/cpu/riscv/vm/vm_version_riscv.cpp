@@ -57,5 +57,29 @@ void VM_Version::determine_features() {
 
 void VM_Version::initialize() {
   determine_features();
+
+  if (FLAG_IS_DEFAULT(UsePopCountInstruction)) {
+    FLAG_SET_DEFAULT(UsePopCountInstruction, false);
+  }
+
+#ifdef COMPILER2
+  // RV64GC base ISA has no hardware conditional move or prefetch instruction
+  if (ConditionalMoveLimit > 0) {
+    FLAG_SET_DEFAULT(ConditionalMoveLimit, 0);
+  }
+  if (FLAG_IS_DEFAULT(AllocatePrefetchStyle)) {
+    FLAG_SET_DEFAULT(AllocatePrefetchStyle, 0);
+  }
+  if (FLAG_IS_DEFAULT(MaxVectorSize)) {
+    FLAG_SET_DEFAULT(MaxVectorSize, 0);
+  }
+  if (FLAG_IS_DEFAULT(UseMulAddIntrinsic)) {
+    FLAG_SET_DEFAULT(UseMulAddIntrinsic, true);
+  }
+  if (FLAG_IS_DEFAULT(UseMultiplyToLenIntrinsic)) {
+    FLAG_SET_DEFAULT(UseMultiplyToLenIntrinsic, true);
+  }
+#endif // COMPILER2
+
   _initialized = true;
 }

@@ -507,7 +507,7 @@ void TemplateTable::fast_iload() {
 void TemplateTable::fast_icaload() {
   transition(vtos, itos);
   locals_index(x12);
-  __ ld(x11, iaddress(x12, t0, _masm));
+  __ lw(x11, iaddress(x12, t0, _masm));
   __ pop_ptr(x10);
 
   index_check(x10, x11);
@@ -709,6 +709,7 @@ void TemplateTable::index_check(Register array, Register index) {
     __ mv(x11, index);
   }
   Label ok;
+  __ addw(index, index, zr);
   __ bltu(index, length, ok);
   __ mv(x13, array);
   __ mv(t1, Interpreter::_throw_ArrayIndexOutOfBoundsException_entry);
@@ -1419,20 +1420,45 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
   __ dispatch_only(vtos);
 
   if (UseLoopCounter && UseOnStackReplacement) {
+    // invocation counter overflow
     __ bind(backedge_counter_overflow);
     __ neg(x12, x12);
-    __ add(x12, x12, xbcp);
-    __ call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::frequency_counter_overflow), x12);
-    __ lbu(t0, Address(xbcp, 0));
+    __ add(x12, x12, xbcp);     // branch xbcp
+    // IcoResult frequency_counter_overflow([JavaThread*], address branch_bcp)
+    __ call_VM(noreg,
+               CAST_FROM_FN_PTR(address,
+                                InterpreterRuntime::frequency_counter_overflow),
+               x12);
 
-    Label no_osr;
-    __ beqz(x10, no_osr);
+    // x10: osr nmethod (osr ok) or NULL (osr not possible)
+    __ beqz(x10, dispatch);     // test result -- no osr if null
+    // nmethod may have been invalidated (VM may block upon call_VM return)
+    __ lw(x12, Address(x10, nmethod::entry_bci_offset()));
+    __ addi(x12, x12, -InvalidOSREntryBci);
+    __ beqz(x12, dispatch);
+
+    // We have the address of an on stack replacement routine in x10.
+    // We need to prepare to execute the OSR method. First we must
+    // migrate the locals and monitors off of the stack.
+    __ mv(x9, x10);                             // save the nmethod
+
+    call_VM(noreg, CAST_FROM_FN_PTR(address, SharedRuntime::OSR_migration_begin));
+
+    // x10 is OSR buffer, move it to expected parameter location
+    __ mv(j_rarg0, x10);
+
+    // remove activation
+    // get sender esp
+    __ ld(esp,
+        Address(fp, frame::interpreter_frame_sender_sp_offset * wordSize));
+    // remove frame anchor
+    __ leave();
+    // Ensure compiled code always sees stack at proper alignment
     __ andi(sp, esp, -16);
-    __ ld(t1, Address(x10, nmethod::osr_entry_point_offset()));
-    __ jr(t1);
 
-    __ bind(no_osr);
-    __ dispatch_only(vtos);
+    // and begin the OSR nmethod
+    __ ld(t0, Address(x9, nmethod::osr_entry_point_offset()));
+    __ jr(t0);
   }
 }
 

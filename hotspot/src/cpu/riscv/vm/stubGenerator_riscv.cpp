@@ -830,10 +830,11 @@ class StubGenerator: public StubCodeGenerator {
     StubRoutines::_arrayof_jlong_arraycopy          = generate_conjoint_copy(sizeof(jlong), false, entry, NULL, "arrayof_jlong_arraycopy");
 
     // oop
-    StubRoutines::_oop_disjoint_arraycopy         = generate_disjoint_copy(sizeof(oop), true, &entry, "oop_disjoint_arraycopy");
-    StubRoutines::_oop_arraycopy                  = generate_conjoint_copy(sizeof(oop), true, entry, &entry_oop_arraycopy, "oop_arraycopy");
-    StubRoutines::_arrayof_oop_disjoint_arraycopy = generate_disjoint_copy(sizeof(oop), true, &entry, "arrayof_oop_disjoint_arraycopy");
-    StubRoutines::_arrayof_oop_arraycopy          = generate_conjoint_copy(sizeof(oop), true, entry, NULL, "arrayof_oop_arraycopy");
+    size_t oop_size = UseCompressedOops ? sizeof(narrowOop) : sizeof(oop);
+    StubRoutines::_oop_disjoint_arraycopy         = generate_disjoint_copy(oop_size, true, &entry, "oop_disjoint_arraycopy");
+    StubRoutines::_oop_arraycopy                  = generate_conjoint_copy(oop_size, true, entry, &entry_oop_arraycopy, "oop_arraycopy");
+    StubRoutines::_arrayof_oop_disjoint_arraycopy = generate_disjoint_copy(oop_size, true, &entry, "arrayof_oop_disjoint_arraycopy");
+    StubRoutines::_arrayof_oop_arraycopy          = generate_conjoint_copy(oop_size, true, entry, NULL, "arrayof_oop_arraycopy");
 
     StubRoutines::_oop_disjoint_arraycopy_uninit         = StubRoutines::_oop_disjoint_arraycopy;
     StubRoutines::_oop_arraycopy_uninit                  = StubRoutines::_oop_arraycopy;

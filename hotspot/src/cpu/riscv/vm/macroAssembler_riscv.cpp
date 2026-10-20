@@ -43,6 +43,10 @@
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/thread.hpp"
+#ifdef COMPILER2
+#include "opto/compile.hpp"
+#include "opto/subnode.hpp"
+#endif
 
 // -------------------------------------------------------------
 // 64-bit Pointer and Constant Loading (movptr vs li)
@@ -134,7 +138,11 @@ void MacroAssembler::mv(Register Rd, Address dest) {
 // Memory Operations using Address
 // -------------------------------------------------------------
 void MacroAssembler::ld(Register dst, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(dst, adr, offset);
+    Assembler::ld(dst, dst, offset);
+  } else if (adr.is_simm12()) {
     Assembler::ld(dst, adr.base(), adr.offset());
   } else {
     Register scratch = (dst == adr.base()) ? tmp : dst;
@@ -146,7 +154,12 @@ void MacroAssembler::ld(Register dst, Address adr, Register tmp) {
 }
 
 void MacroAssembler::sd(Register src, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    assert_different_registers(src, tmp);
+    int32_t offset = 0;
+    la_patchable(tmp, adr, offset);
+    Assembler::sd(src, tmp, offset);
+  } else if (adr.is_simm12()) {
     Assembler::sd(src, adr.base(), adr.offset());
   } else {
     assert_different_registers(src, tmp);
@@ -158,7 +171,11 @@ void MacroAssembler::sd(Register src, Address adr, Register tmp) {
 }
 
 void MacroAssembler::lw(Register dst, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(dst, adr, offset);
+    Assembler::lw(dst, dst, offset);
+  } else if (adr.is_simm12()) {
     Assembler::lw(dst, adr.base(), adr.offset());
   } else {
     Register scratch = (dst == adr.base()) ? tmp : dst;
@@ -170,7 +187,12 @@ void MacroAssembler::lw(Register dst, Address adr, Register tmp) {
 }
 
 void MacroAssembler::sw(Register src, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    assert_different_registers(src, tmp);
+    int32_t offset = 0;
+    la_patchable(tmp, adr, offset);
+    Assembler::sw(src, tmp, offset);
+  } else if (adr.is_simm12()) {
     Assembler::sw(src, adr.base(), adr.offset());
   } else {
     assert_different_registers(src, tmp);
@@ -182,7 +204,11 @@ void MacroAssembler::sw(Register src, Address adr, Register tmp) {
 }
 
 void MacroAssembler::lh(Register dst, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(dst, adr, offset);
+    Assembler::lh(dst, dst, offset);
+  } else if (adr.is_simm12()) {
     Assembler::lh(dst, adr.base(), adr.offset());
   } else {
     Register scratch = (dst == adr.base()) ? tmp : dst;
@@ -194,7 +220,12 @@ void MacroAssembler::lh(Register dst, Address adr, Register tmp) {
 }
 
 void MacroAssembler::sh(Register src, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    assert_different_registers(src, tmp);
+    int32_t offset = 0;
+    la_patchable(tmp, adr, offset);
+    Assembler::sh(src, tmp, offset);
+  } else if (adr.is_simm12()) {
     Assembler::sh(src, adr.base(), adr.offset());
   } else {
     assert_different_registers(src, tmp);
@@ -206,7 +237,11 @@ void MacroAssembler::sh(Register src, Address adr, Register tmp) {
 }
 
 void MacroAssembler::lb(Register dst, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(dst, adr, offset);
+    Assembler::lb(dst, dst, offset);
+  } else if (adr.is_simm12()) {
     Assembler::lb(dst, adr.base(), adr.offset());
   } else {
     Register scratch = (dst == adr.base()) ? tmp : dst;
@@ -218,7 +253,12 @@ void MacroAssembler::lb(Register dst, Address adr, Register tmp) {
 }
 
 void MacroAssembler::sb(Register src, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    assert_different_registers(src, tmp);
+    int32_t offset = 0;
+    la_patchable(tmp, adr, offset);
+    Assembler::sb(src, tmp, offset);
+  } else if (adr.is_simm12()) {
     Assembler::sb(src, adr.base(), adr.offset());
   } else {
     assert_different_registers(src, tmp);
@@ -230,7 +270,11 @@ void MacroAssembler::sb(Register src, Address adr, Register tmp) {
 }
 
 void MacroAssembler::lbu(Register rd, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(rd, adr, offset);
+    Assembler::lbu(rd, rd, offset);
+  } else if (adr.is_simm12()) {
     Assembler::lbu(rd, adr.base(), adr.offset());
   } else {
     Register scratch = (rd == adr.base()) ? tmp : rd;
@@ -242,7 +286,11 @@ void MacroAssembler::lbu(Register rd, Address adr, Register tmp) {
 }
 
 void MacroAssembler::lhu(Register rd, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(rd, adr, offset);
+    Assembler::lhu(rd, rd, offset);
+  } else if (adr.is_simm12()) {
     Assembler::lhu(rd, adr.base(), adr.offset());
   } else {
     Register scratch = (rd == adr.base()) ? tmp : rd;
@@ -254,7 +302,11 @@ void MacroAssembler::lhu(Register rd, Address adr, Register tmp) {
 }
 
 void MacroAssembler::lwu(Register rd, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(rd, adr, offset);
+    Assembler::lwu(rd, rd, offset);
+  } else if (adr.is_simm12()) {
     Assembler::lwu(rd, adr.base(), adr.offset());
   } else {
     Register scratch = (rd == adr.base()) ? tmp : rd;
@@ -266,7 +318,11 @@ void MacroAssembler::lwu(Register rd, Address adr, Register tmp) {
 }
 
 void MacroAssembler::fld(FloatRegister dst, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(tmp, adr, offset);
+    Assembler::fld(dst, tmp, offset);
+  } else if (adr.is_simm12()) {
     Assembler::fld(dst, adr.base(), adr.offset());
   } else {
     assert_different_registers(adr.base(), tmp);
@@ -277,7 +333,11 @@ void MacroAssembler::fld(FloatRegister dst, Address adr, Register tmp) {
 }
 
 void MacroAssembler::fsd(FloatRegister src, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(tmp, adr, offset);
+    Assembler::fsd(src, tmp, offset);
+  } else if (adr.is_simm12()) {
     Assembler::fsd(src, adr.base(), adr.offset());
   } else {
     assert_different_registers(adr.base(), tmp);
@@ -288,7 +348,11 @@ void MacroAssembler::fsd(FloatRegister src, Address adr, Register tmp) {
 }
 
 void MacroAssembler::flw(FloatRegister dst, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(tmp, adr, offset);
+    Assembler::flw(dst, tmp, offset);
+  } else if (adr.is_simm12()) {
     Assembler::flw(dst, adr.base(), adr.offset());
   } else {
     assert_different_registers(adr.base(), tmp);
@@ -299,7 +363,11 @@ void MacroAssembler::flw(FloatRegister dst, Address adr, Register tmp) {
 }
 
 void MacroAssembler::fsw(FloatRegister src, Address adr, Register tmp) {
-  if (adr.is_simm12()) {
+  if (adr.getMode() == Address::literal) {
+    int32_t offset = 0;
+    la_patchable(tmp, adr, offset);
+    Assembler::fsw(src, tmp, offset);
+  } else if (adr.is_simm12()) {
     Assembler::fsw(src, adr.base(), adr.offset());
   } else {
     assert_different_registers(adr.base(), tmp);
@@ -520,8 +588,8 @@ void MacroAssembler::la_patchable(Register reg1, const Address &dest, int32_t &o
   assert(dest.getMode() == Address::literal, "la_patchable must be applied to a literal address");
   InstructionMark im(this);
   code_section()->relocate(pc(), dest.rspec());
-  if (rtype != relocInfo::none &&
-      CodeCache::contains(dest.target()) &&
+  if ((rtype == relocInfo::internal_word_type ||
+       (rtype != relocInfo::none && CodeCache::contains(dest.target()))) &&
       is_offset_in_range(dest.target() - pc(), 32)) {
     int64_t distance = dest.target() - pc();
     auipc(reg1, (int32_t)distance + 0x800);
@@ -587,16 +655,29 @@ address MacroAssembler::trampoline_call(Address entry, CodeBuffer* cbuf) {
 
   // Look up current Compile/C1 stub section if cbuf is provided
   if (far_branches()) {
-    address stub = emit_trampoline_stub(offset(), entry.target());
-    if (stub == NULL) {
-      return NULL; // CodeCache / stub section is full
+    bool in_scratch_emit_size = false;
+#ifdef COMPILER2
+    // Do not emit a trampoline stub when C2 is computing instruction sizes
+    // in a scratch buffer during Compile::shorten_branches!
+    if (JavaThread::current()->is_Compiler_thread()) {
+      CompileTask* task = ciEnv::current()->task();
+      in_scratch_emit_size =
+        (task != NULL && is_c2_compile(task->comp_level()) &&
+         Compile::current()->in_scratch_emit_size());
+    }
+#endif
+    if (!in_scratch_emit_size) {
+      address stub = emit_trampoline_stub(offset(), entry.target());
+      if (stub == NULL) {
+        return NULL; // CodeCache / stub section is full
+      }
     }
   }
 
+  InstructionMark im(this);
   if (cbuf != NULL) {
     cbuf->set_insts_mark();
   }
-  InstructionMark im(this);
   relocate(entry.rspec());
   if (!far_branches() && reachable_from_branch_at(pc(), entry.target())) {
     Assembler::jal(ra, (int32_t)(entry.target() - pc()));
@@ -2874,3 +2955,649 @@ void MacroAssembler::stop(const char* msg) {
   jalr(t0);
   ebreak();
 }
+
+// -------------------------------------------------------------
+// Byte Reversal, Rotate, and C2 Primitives
+// -------------------------------------------------------------
+void MacroAssembler::ror_imm(Register dst, Register src, uint32_t shift, Register tmp) {
+  assert(shift < 64, "shift out of range");
+  if (shift == 0) {
+    mv(dst, src);
+    return;
+  }
+  assert_different_registers(dst, tmp);
+  assert_different_registers(src, tmp);
+  srli(tmp, src, shift);
+  slli(dst, src, 64 - shift);
+  orr(dst, dst, tmp);
+}
+
+void MacroAssembler::revb_h_h(Register Rd, Register Rs, Register tmp) {
+  assert_different_registers(Rs, tmp);
+  assert_different_registers(Rd, tmp);
+  srli(tmp, Rs, 8);
+  andi(tmp, tmp, 0xFF);
+  slli(Rd, Rs, 56);
+  srai(Rd, Rd, 48); // sign-extend
+  orr(Rd, Rd, tmp);
+}
+
+void MacroAssembler::revb_h_h_u(Register Rd, Register Rs, Register tmp) {
+  assert_different_registers(Rs, tmp);
+  assert_different_registers(Rd, tmp);
+  srli(tmp, Rs, 8);
+  andi(tmp, tmp, 0xFF);
+  andi(Rd, Rs, 0xFF);
+  slli(Rd, Rd, 8);
+  orr(Rd, Rd, tmp);
+}
+
+void MacroAssembler::revb_h_w_u(Register Rd, Register Rs, Register tmp1, Register tmp2) {
+  assert_different_registers(Rs, tmp1, tmp2);
+  assert_different_registers(Rd, tmp1, tmp2);
+  srli(tmp2, Rs, 16);
+  revb_h_h_u(tmp2, tmp2, tmp1);
+  revb_h_h_u(Rd, Rs, tmp1);
+  slli(tmp2, tmp2, 16);
+  orr(Rd, Rd, tmp2);
+}
+
+void MacroAssembler::revb_w_w(Register Rd, Register Rs, Register tmp1, Register tmp2) {
+  assert_different_registers(Rs, tmp1, tmp2);
+  assert_different_registers(Rd, tmp1, tmp2);
+  revb_h_w_u(Rd, Rs, tmp1, tmp2);
+  slli(tmp2, Rd, 48);
+  srai(tmp2, tmp2, 32); // sign-extend
+  srli(Rd, Rd, 16);
+  orr(Rd, Rd, tmp2);
+}
+
+void MacroAssembler::revb_h_helper(Register Rd, Register Rs, Register tmp1, Register tmp2) {
+  assert_different_registers(Rs, tmp1, tmp2);
+  assert_different_registers(Rd, tmp1);
+  srli(tmp1, Rs, 48);
+  andi(tmp2, tmp1, 0xFF);
+  slli(tmp2, tmp2, 8);
+  srli(tmp1, tmp1, 8);
+  orr(tmp1, tmp1, tmp2);
+  slli(Rd, Rs, 16);
+  orr(Rd, Rd, tmp1);
+}
+
+void MacroAssembler::revb_h(Register Rd, Register Rs, Register tmp1, Register tmp2) {
+  assert_different_registers(Rs, tmp1, tmp2);
+  assert_different_registers(Rd, tmp1, tmp2);
+  revb_h_helper(Rd, Rs, tmp1, tmp2);
+  for (int i = 0; i < 3; ++i) {
+    revb_h_helper(Rd, Rd, tmp1, tmp2);
+  }
+}
+
+void MacroAssembler::revb_w(Register Rd, Register Rs, Register tmp1, Register tmp2) {
+  assert_different_registers(Rs, tmp1, tmp2);
+  assert_different_registers(Rd, tmp1, tmp2);
+  revb(Rd, Rs, tmp1, tmp2);
+  ror_imm(Rd, Rd, 32);
+}
+
+const int MacroAssembler::zero_words_block_size = 8;
+
+address MacroAssembler::zero_words(Register ptr, Register cnt) {
+  assert(is_power_of_2(zero_words_block_size), "adjust this");
+  assert(ptr == x28 && cnt == x29, "mismatch in register usage");
+  assert_different_registers(cnt, t0);
+
+  mv(t0, zero_words_block_size);
+  Label around;
+  bltu(cnt, t0, around);
+  {
+    Label loop;
+    bind(loop);
+    for (int i = 0; i < zero_words_block_size; i++) {
+      sd(zr, Address(ptr, i * wordSize));
+    }
+    addi(ptr, ptr, zero_words_block_size * wordSize);
+    subi(cnt, cnt, zero_words_block_size);
+    bgeu(cnt, t0, loop);
+  }
+  bind(around);
+  for (int i = zero_words_block_size >> 1; i > 1; i >>= 1) {
+    Label l;
+    andi(t0, cnt, i);
+    beqz(t0, l);
+    for (int j = 0; j < i; j++) {
+      sd(zr, Address(ptr, 0));
+      addi(ptr, ptr, wordSize);
+    }
+    bind(l);
+  }
+  {
+    Label l;
+    andi(t0, cnt, 1);
+    beqz(t0, l);
+    sd(zr, Address(ptr, 0));
+    bind(l);
+  }
+  return pc();
+}
+
+#ifdef COMPILER2
+typedef void (MacroAssembler::*conditional_branch_insn)(Register op1, Register op2, Label& label, bool is_far);
+typedef void (MacroAssembler::*float_conditional_branch_insn)(FloatRegister op1, FloatRegister op2, Label& label,
+                                                              bool is_far, bool is_unordered);
+
+static conditional_branch_insn conditional_branches[] =
+{
+  /* SHORT / SIGNED branches */
+  (conditional_branch_insn)&MacroAssembler::beq,
+  (conditional_branch_insn)&MacroAssembler::bgt,
+  NULL, // BoolTest::overflow
+  (conditional_branch_insn)&MacroAssembler::blt,
+  (conditional_branch_insn)&MacroAssembler::bne,
+  (conditional_branch_insn)&MacroAssembler::ble,
+  NULL, // BoolTest::no_overflow
+  (conditional_branch_insn)&MacroAssembler::bge,
+
+  /* UNSIGNED branches */
+  (conditional_branch_insn)&MacroAssembler::beq,
+  (conditional_branch_insn)&MacroAssembler::bgtu,
+  NULL,
+  (conditional_branch_insn)&MacroAssembler::bltu,
+  (conditional_branch_insn)&MacroAssembler::bne,
+  (conditional_branch_insn)&MacroAssembler::bleu,
+  NULL,
+  (conditional_branch_insn)&MacroAssembler::bgeu
+};
+
+static float_conditional_branch_insn float_conditional_branches[] =
+{
+  /* FLOAT branches */
+  (float_conditional_branch_insn)&MacroAssembler::float_beq,
+  (float_conditional_branch_insn)&MacroAssembler::float_bgt,
+  NULL,  // BoolTest::overflow
+  (float_conditional_branch_insn)&MacroAssembler::float_blt,
+  (float_conditional_branch_insn)&MacroAssembler::float_bne,
+  (float_conditional_branch_insn)&MacroAssembler::float_ble,
+  NULL, // BoolTest::no_overflow
+  (float_conditional_branch_insn)&MacroAssembler::float_bge,
+
+  /* DOUBLE branches */
+  (float_conditional_branch_insn)&MacroAssembler::double_beq,
+  (float_conditional_branch_insn)&MacroAssembler::double_bgt,
+  NULL,
+  (float_conditional_branch_insn)&MacroAssembler::double_blt,
+  (float_conditional_branch_insn)&MacroAssembler::double_bne,
+  (float_conditional_branch_insn)&MacroAssembler::double_ble,
+  NULL,
+  (float_conditional_branch_insn)&MacroAssembler::double_bge
+};
+
+void MacroAssembler::cmp_branch(int cmpFlag, Register op1, Register op2, Label& label, bool is_far) {
+  assert(cmpFlag >= 0 && cmpFlag < (int)(sizeof(conditional_branches) / sizeof(conditional_branches[0])),
+         "invalid conditional branch index");
+  (this->*conditional_branches[cmpFlag])(op1, op2, label, is_far);
+}
+
+void MacroAssembler::float_cmp_branch(int cmpFlag, FloatRegister op1, FloatRegister op2, Label& label, bool is_far) {
+  assert(cmpFlag >= 0 && cmpFlag < (int)(sizeof(float_conditional_branches) / sizeof(float_conditional_branches[0])),
+         "invalid float conditional branch index");
+  int booltest_flag = cmpFlag & ~(MacroAssembler::double_branch_mask);
+  (this->*float_conditional_branches[cmpFlag])(op1, op2, label, is_far,
+    (booltest_flag == (BoolTest::ge) || booltest_flag == (BoolTest::gt)) ? false : true);
+}
+
+void MacroAssembler::enc_cmpUEqNeLeGt_imm0_branch(int cmpFlag, Register op1, Label& L, bool is_far) {
+  switch (cmpFlag) {
+    case BoolTest::eq:
+    case BoolTest::le:
+      beqz(op1, L, is_far);
+      break;
+    case BoolTest::ne:
+    case BoolTest::gt:
+      bnez(op1, L, is_far);
+      break;
+    default:
+      ShouldNotReachHere();
+  }
+}
+
+void MacroAssembler::enc_cmpEqNe_imm0_branch(int cmpFlag, Register op1, Label& L, bool is_far) {
+  switch (cmpFlag) {
+    case BoolTest::eq:
+      beqz(op1, L, is_far);
+      break;
+    case BoolTest::ne:
+      bnez(op1, L, is_far);
+      break;
+    default:
+      ShouldNotReachHere();
+  }
+}
+
+void MacroAssembler::enc_cmove(int cmpFlag, Register op1, Register op2, Register dst, Register src) {
+  Label L;
+  cmp_branch(cmpFlag ^ (1 << neg_cond_bits), op1, op2, L);
+  mv(dst, src);
+  bind(L);
+}
+
+void MacroAssembler::minmax_FD(FloatRegister dst, FloatRegister src1, FloatRegister src2,
+                               bool is_double, bool is_min) {
+  assert_different_registers(dst, src1, src2);
+
+  Label Done;
+  fsflags(zr);
+  if (is_double) {
+    is_min ? fmin_d(dst, src1, src2)
+           : fmax_d(dst, src1, src2);
+    flt_d(zr, src1, src2);
+  } else {
+    is_min ? fmin_s(dst, src1, src2)
+           : fmax_s(dst, src1, src2);
+    flt_s(zr, src1, src2);
+  }
+
+  frflags(t0);
+  beqz(t0, Done);
+
+  is_double ? fadd_d(dst, src1, src2)
+            : fadd_s(dst, src1, src2);
+
+  bind(Done);
+}
+
+void MacroAssembler::mul_add(Register out, Register in, Register offset,
+                             Register len, Register k, Register tmp) {
+  Label L_tail_loop, L_unroll, L_end;
+  mv(tmp, out);
+  mv(out, zr);
+  blez(len, L_end);
+  zero_extend(k, k, 32);
+  slliw(t0, offset, LogBytesPerInt);
+  add(offset, tmp, t0);
+  slliw(t0, len, LogBytesPerInt);
+  add(in, in, t0);
+
+  const int unroll = 8;
+  li(tmp, unroll);
+  blt(len, tmp, L_tail_loop);
+  bind(L_unroll);
+  for (int i = 0; i < unroll; i++) {
+    sub(in, in, BytesPerInt);
+    lwu(t0, Address(in, 0));
+    mul(t1, t0, k);
+    add(t0, t1, out);
+    sub(offset, offset, BytesPerInt);
+    lwu(t1, Address(offset, 0));
+    add(t0, t0, t1);
+    sw(t0, Address(offset, 0));
+    srli(out, t0, 32);
+  }
+  subw(len, len, tmp);
+  bge(len, tmp, L_unroll);
+
+  bind(L_tail_loop);
+  blez(len, L_end);
+  sub(in, in, BytesPerInt);
+  lwu(t0, Address(in, 0));
+  mul(t1, t0, k);
+  add(t0, t1, out);
+  sub(offset, offset, BytesPerInt);
+  lwu(t1, Address(offset, 0));
+  add(t0, t0, t1);
+  sw(t0, Address(offset, 0));
+  srli(out, t0, 32);
+  subw(len, len, 1);
+  j(L_tail_loop);
+
+  bind(L_end);
+}
+
+void MacroAssembler::cad(Register dst, Register src1, Register src2, Register carry) {
+  assert_different_registers(dst, carry);
+  assert_different_registers(dst, src2);
+  add(dst, src1, src2);
+  sltu(carry, dst, src2);
+}
+
+void MacroAssembler::adc(Register dst, Register src1, Register src2, Register carry) {
+  assert_different_registers(dst, carry);
+  add(dst, src1, src2);
+  add(dst, dst, carry);
+}
+
+void MacroAssembler::cadc(Register dst, Register src1, Register src2, Register carry) {
+  assert_different_registers(dst, src2);
+  adc(dst, src1, src2, carry);
+  sltu(carry, dst, src2);
+}
+
+void MacroAssembler::add2_with_carry(Register final_dest_hi, Register dest_hi, Register dest_lo,
+                                     Register src1, Register src2, Register carry) {
+  cad(dest_lo, dest_lo, src1, carry);
+  add(dest_hi, dest_hi, carry);
+  cad(dest_lo, dest_lo, src2, carry);
+  add(final_dest_hi, dest_hi, carry);
+}
+
+void MacroAssembler::multiply_32_x_32_loop(Register x, Register xstart, Register x_xstart,
+                                           Register y, Register y_idx, Register z,
+                                           Register carry, Register product,
+                                           Register idx, Register kdx) {
+  Label L_first_loop, L_first_loop_exit;
+  blez(idx, L_first_loop_exit);
+
+  shadd(t0, xstart, x, t0, LogBytesPerInt);
+  lwu(x_xstart, Address(t0, 0));
+
+  bind(L_first_loop);
+  subw(idx, idx, 1);
+  shadd(t0, idx, y, t0, LogBytesPerInt);
+  lwu(y_idx, Address(t0, 0));
+  mul(product, x_xstart, y_idx);
+  add(product, product, carry);
+  srli(carry, product, 32);
+  subw(kdx, kdx, 1);
+  shadd(t0, kdx, z, t0, LogBytesPerInt);
+  sw(product, Address(t0, 0));
+  bgtz(idx, L_first_loop);
+
+  bind(L_first_loop_exit);
+}
+
+void MacroAssembler::multiply_64_x_64_loop(Register x, Register xstart, Register x_xstart,
+                                           Register y, Register y_idx, Register z,
+                                           Register carry, Register product,
+                                           Register idx, Register kdx) {
+  Label L_first_loop, L_first_loop_exit;
+  Label L_one_x, L_one_y, L_multiply;
+
+  subw(xstart, xstart, 1);
+  bltz(xstart, L_one_x);
+
+  shadd(t0, xstart, x, t0, LogBytesPerInt);
+  ld(x_xstart, Address(t0, 0));
+  ror_imm(x_xstart, x_xstart, 32);
+
+  bind(L_first_loop);
+  subw(idx, idx, 1);
+  bltz(idx, L_first_loop_exit);
+  subw(idx, idx, 1);
+  bltz(idx, L_one_y);
+
+  shadd(t0, idx, y, t0, LogBytesPerInt);
+  ld(y_idx, Address(t0, 0));
+  ror_imm(y_idx, y_idx, 32);
+  bind(L_multiply);
+
+  mulhu(t0, x_xstart, y_idx);
+  mul(product, x_xstart, y_idx);
+  cad(product, product, carry, t1);
+  adc(carry, t0, zr, t1);
+
+  subw(kdx, kdx, 2);
+  ror_imm(product, product, 32);
+  shadd(t0, kdx, z, t0, LogBytesPerInt);
+  sd(product, Address(t0, 0));
+
+  j(L_first_loop);
+
+  bind(L_one_y);
+  lwu(y_idx, Address(y, 0));
+  j(L_multiply);
+
+  bind(L_one_x);
+  lwu(x_xstart, Address(x, 0));
+  j(L_first_loop);
+
+  bind(L_first_loop_exit);
+}
+
+void MacroAssembler::multiply_128_x_128_loop(Register y, Register z,
+                                             Register carry, Register carry2,
+                                             Register idx, Register jdx,
+                                             Register yz_idx1, Register yz_idx2,
+                                             Register tmp, Register tmp3, Register tmp4,
+                                             Register tmp6, Register product_hi) {
+  Label L_third_loop, L_third_loop_exit, L_post_third_loop_done;
+
+  srliw(jdx, idx, 2);
+
+  bind(L_third_loop);
+
+  subw(jdx, jdx, 1);
+  bltz(jdx, L_third_loop_exit);
+  subw(idx, idx, 4);
+
+  shadd(t0, idx, y, t0, LogBytesPerInt);
+  ld(yz_idx2, Address(t0, 0));
+  ld(yz_idx1, Address(t0, wordSize));
+
+  shadd(tmp6, idx, z, t0, LogBytesPerInt);
+
+  ror_imm(yz_idx1, yz_idx1, 32);
+  ror_imm(yz_idx2, yz_idx2, 32);
+
+  ld(t1, Address(tmp6, 0));
+  ld(t0, Address(tmp6, wordSize));
+
+  mul(tmp3, product_hi, yz_idx1);
+  mulhu(tmp4, product_hi, yz_idx1);
+
+  ror_imm(t0, t0, 32, tmp);
+  ror_imm(t1, t1, 32, tmp);
+
+  mul(tmp, product_hi, yz_idx2);
+  mulhu(carry2, product_hi, yz_idx2);
+
+  cad(tmp3, tmp3, carry, carry);
+  adc(tmp4, tmp4, zr, carry);
+  cad(tmp3, tmp3, t0, t0);
+  cadc(tmp4, tmp4, tmp, t0);
+  adc(carry, carry2, zr, t0);
+  cad(tmp4, tmp4, t1, carry2);
+  adc(carry, carry, zr, carry2);
+
+  ror_imm(tmp3, tmp3, 32);
+  ror_imm(tmp4, tmp4, 32);
+  sd(tmp4, Address(tmp6, 0));
+  sd(tmp3, Address(tmp6, wordSize));
+
+  j(L_third_loop);
+
+  bind(L_third_loop_exit);
+
+  andi(idx, idx, 0x3);
+  beqz(idx, L_post_third_loop_done);
+
+  Label L_check_1;
+  subw(idx, idx, 2);
+  bltz(idx, L_check_1);
+
+  shadd(t0, idx, y, t0, LogBytesPerInt);
+  ld(yz_idx1, Address(t0, 0));
+  ror_imm(yz_idx1, yz_idx1, 32);
+
+  mul(tmp3, product_hi, yz_idx1);
+  mulhu(tmp4, product_hi, yz_idx1);
+
+  shadd(t0, idx, z, t0, LogBytesPerInt);
+  ld(yz_idx2, Address(t0, 0));
+  ror_imm(yz_idx2, yz_idx2, 32, tmp);
+
+  add2_with_carry(carry, tmp4, tmp3, carry, yz_idx2, tmp);
+
+  ror_imm(tmp3, tmp3, 32, tmp);
+  sd(tmp3, Address(t0, 0));
+
+  bind(L_check_1);
+
+  andi(idx, idx, 0x1);
+  subw(idx, idx, 1);
+  bltz(idx, L_post_third_loop_done);
+  shadd(t0, idx, y, t0, LogBytesPerInt);
+  lwu(tmp4, Address(t0, 0));
+  mul(tmp3, tmp4, product_hi);
+  mulhu(carry2, tmp4, product_hi);
+
+  shadd(t0, idx, z, t0, LogBytesPerInt);
+  lwu(tmp4, Address(t0, 0));
+
+  add2_with_carry(carry2, carry2, tmp3, tmp4, carry, t0);
+
+  shadd(t0, idx, z, t0, LogBytesPerInt);
+  sw(tmp3, Address(t0, 0));
+
+  slli(t0, carry2, 32);
+  srli(carry, tmp3, 32);
+  orr(carry, carry, t0);
+
+  bind(L_post_third_loop_done);
+}
+
+void MacroAssembler::multiply_to_len(Register x, Register xlen, Register y, Register ylen,
+                                     Register z, Register zlen,
+                                     Register tmp1, Register tmp2, Register tmp3, Register tmp4,
+                                     Register tmp5, Register tmp6, Register product_hi) {
+  assert_different_registers(x, xlen, y, ylen, z, zlen, tmp1, tmp2, tmp3, tmp4, tmp5, tmp6);
+
+  const Register idx = tmp1;
+  const Register kdx = tmp2;
+  const Register xstart = tmp3;
+
+  const Register y_idx = tmp4;
+  const Register carry = tmp5;
+  const Register product = xlen;
+  const Register x_xstart = zlen;
+
+  mv(idx, ylen);
+  mv(kdx, zlen);
+  mv(carry, zr);
+
+  Label L_multiply_64_x_64_loop, L_done;
+
+  subw(xstart, xlen, 1);
+  bltz(xstart, L_done);
+
+  const Register jdx = tmp1;
+
+  if (AvoidUnalignedAccesses) {
+    orr(t0, xlen, ylen);
+    andi(t0, t0, 0x1);
+    beqz(t0, L_multiply_64_x_64_loop);
+
+    multiply_32_x_32_loop(x, xstart, x_xstart, y, y_idx, z, carry, product, idx, kdx);
+    shadd(t0, xstart, z, t0, LogBytesPerInt);
+    sw(carry, Address(t0, 0));
+
+    Label L_second_loop_unaligned;
+    bind(L_second_loop_unaligned);
+    mv(carry, zr);
+    mv(jdx, ylen);
+    subw(xstart, xstart, 1);
+    bltz(xstart, L_done);
+    sub(sp, sp, 2 * wordSize);
+    sd(z, Address(sp, 0));
+    sd(zr, Address(sp, wordSize));
+    shadd(t0, xstart, z, t0, LogBytesPerInt);
+    addi(z, t0, 4);
+    shadd(t0, xstart, x, t0, LogBytesPerInt);
+    lwu(product, Address(t0, 0));
+    Label L_third_loop, L_third_loop_exit;
+
+    blez(jdx, L_third_loop_exit);
+
+    bind(L_third_loop);
+    subw(jdx, jdx, 1);
+    shadd(t0, jdx, y, t0, LogBytesPerInt);
+    lwu(t0, Address(t0, 0));
+    mul(t1, t0, product);
+    add(t0, t1, carry);
+    shadd(tmp6, jdx, z, t1, LogBytesPerInt);
+    lwu(t1, Address(tmp6, 0));
+    add(t0, t0, t1);
+    sw(t0, Address(tmp6, 0));
+    srli(carry, t0, 32);
+    bgtz(jdx, L_third_loop);
+
+    bind(L_third_loop_exit);
+    ld(z, Address(sp, 0));
+    addi(sp, sp, 2 * wordSize);
+    shadd(t0, xstart, z, t0, LogBytesPerInt);
+    sw(carry, Address(t0, 0));
+
+    j(L_second_loop_unaligned);
+  }
+
+  bind(L_multiply_64_x_64_loop);
+  multiply_64_x_64_loop(x, xstart, x_xstart, y, y_idx, z, carry, product, idx, kdx);
+
+  Label L_second_loop_aligned;
+  beqz(kdx, L_second_loop_aligned);
+
+  Label L_carry;
+  subw(kdx, kdx, 1);
+  beqz(kdx, L_carry);
+
+  shadd(t0, kdx, z, t0, LogBytesPerInt);
+  sw(carry, Address(t0, 0));
+  srli(carry, carry, 32);
+  subw(kdx, kdx, 1);
+
+  bind(L_carry);
+  shadd(t0, kdx, z, t0, LogBytesPerInt);
+  sw(carry, Address(t0, 0));
+
+  bind(L_second_loop_aligned);
+  mv(carry, zr);
+  mv(jdx, ylen);
+
+  subw(xstart, xstart, 1);
+  bltz(xstart, L_done);
+
+  sub(sp, sp, 4 * wordSize);
+  sd(z, Address(sp, 0));
+
+  Label L_last_x;
+  shadd(t0, xstart, z, t0, LogBytesPerInt);
+  addi(z, t0, 4);
+  subw(xstart, xstart, 1);
+  bltz(xstart, L_last_x);
+
+  shadd(t0, xstart, x, t0, LogBytesPerInt);
+  ld(product_hi, Address(t0, 0));
+  ror_imm(product_hi, product_hi, 32);
+
+  Label L_third_loop_prologue;
+  bind(L_third_loop_prologue);
+
+  sd(ylen, Address(sp, wordSize));
+  sd(x, Address(sp, 2 * wordSize));
+  sd(xstart, Address(sp, 3 * wordSize));
+  multiply_128_x_128_loop(y, z, carry, x, jdx, ylen, product,
+                          tmp2, x_xstart, tmp3, tmp4, tmp6, product_hi);
+  ld(z, Address(sp, 0));
+  ld(ylen, Address(sp, wordSize));
+  ld(x, Address(sp, 2 * wordSize));
+  ld(xlen, Address(sp, 3 * wordSize));
+  addi(sp, sp, 4 * wordSize);
+
+  addiw(tmp3, xlen, 1);
+  shadd(t0, tmp3, z, t0, LogBytesPerInt);
+  sw(carry, Address(t0, 0));
+
+  subw(tmp3, tmp3, 1);
+  bltz(tmp3, L_done);
+
+  srli(carry, carry, 32);
+  shadd(t0, tmp3, z, t0, LogBytesPerInt);
+  sw(carry, Address(t0, 0));
+  j(L_second_loop_aligned);
+
+  bind(L_last_x);
+  lwu(product_hi, Address(x, 0));
+  j(L_third_loop_prologue);
+
+  bind(L_done);
+}
+#endif // COMPILER2

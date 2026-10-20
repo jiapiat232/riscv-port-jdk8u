@@ -487,6 +487,14 @@ class MacroAssembler: public Assembler {
   void narrow_subword_type(Register reg, BasicType bt);
   void revbw(Register Rd, Register Rs, Register tmp1 = t0, Register tmp2 = t1);
   void revb(Register Rd, Register Rs, Register tmp1 = t0, Register tmp2 = t1);
+  void revb_h_h(Register Rd, Register Rs, Register tmp = t0);
+  void revb_w_w(Register Rd, Register Rs, Register tmp1 = t0, Register tmp2 = t1);
+  void revb_h_h_u(Register Rd, Register Rs, Register tmp = t0);
+  void revb_h_w_u(Register Rd, Register Rs, Register tmp1 = t0, Register tmp2 = t1);
+  void revb_h_helper(Register Rd, Register Rs, Register tmp1 = t0, Register tmp2 = t1);
+  void revb_h(Register Rd, Register Rs, Register tmp1 = t0, Register tmp2 = t1);
+  void revb_w(Register Rd, Register Rs, Register tmp1 = t0, Register tmp2 = t1);
+  void ror_imm(Register dst, Register src, uint32_t shift, Register tmp = t0);
 
   void fcvt_w_s_safe(Register dst, FloatRegister src, Register tmp = t0);
   void fcvt_l_s_safe(Register dst, FloatRegister src, Register tmp = t0);
@@ -529,6 +537,92 @@ class MacroAssembler: public Assembler {
   void atomic_xchgwu(Register prev, Register newv, Register addr);
   void atomic_xchgalwu(Register prev, Register newv, Register addr);
 
+  static const int zero_words_block_size;
+  address zero_words(Register ptr, Register cnt);
+
+#ifdef COMPILER2
+  // -------------------------------------------------------------
+  // C2 MacroAssembler Primitives (Bridges JDK 8 ADLC _masm & JDK 19 enc_class)
+  // -------------------------------------------------------------
+  static const int bool_test_bits = 3;
+  static const int neg_cond_bits = 2;
+  static const int unsigned_branch_mask = 1 << bool_test_bits;
+  static const int double_branch_mask = 1 << bool_test_bits;
+
+  void cmp_branch(int cmpFlag,
+                  Register op1, Register op2,
+                  Label& label, bool is_far = false);
+
+  void float_cmp_branch(int cmpFlag,
+                        FloatRegister op1, FloatRegister op2,
+                        Label& label, bool is_far = false);
+
+  void enc_cmpUEqNeLeGt_imm0_branch(int cmpFlag, Register op,
+                                    Label& L, bool is_far = false);
+
+  void enc_cmpEqNe_imm0_branch(int cmpFlag, Register op,
+                               Label& L, bool is_far = false);
+
+  void enc_cmove(int cmpFlag,
+                 Register op1, Register op2,
+                 Register dst, Register src);
+
+  void spill(Register r, bool is64, int offset) {
+    is64 ? sd(r, Address(sp, offset))
+         : sw(r, Address(sp, offset));
+  }
+
+  void spill(FloatRegister f, bool is64, int offset) {
+    is64 ? fsd(f, Address(sp, offset))
+         : fsw(f, Address(sp, offset));
+  }
+
+  void unspill(Register r, bool is64, int offset) {
+    is64 ? ld(r, Address(sp, offset))
+         : lw(r, Address(sp, offset));
+  }
+
+  void unspillu(Register r, bool is64, int offset) {
+    is64 ? ld(r, Address(sp, offset))
+         : lwu(r, Address(sp, offset));
+  }
+
+  void unspill(FloatRegister f, bool is64, int offset) {
+    is64 ? fld(f, Address(sp, offset))
+         : flw(f, Address(sp, offset));
+  }
+
+  void minmax_FD(FloatRegister dst,
+                 FloatRegister src1, FloatRegister src2,
+                 bool is_double, bool is_min);
+
+  void mul_add(Register out, Register in, Register offset,
+               Register len, Register k, Register tmp);
+  void cad(Register dst, Register src1, Register src2, Register carry);
+  void cadc(Register dst, Register src1, Register src2, Register carry);
+  void adc(Register dst, Register src1, Register src2, Register carry);
+  void add2_with_carry(Register final_dest_hi, Register dest_hi, Register dest_lo,
+                       Register src1, Register src2, Register carry);
+  void multiply_32_x_32_loop(Register x, Register xstart, Register x_xstart,
+                             Register y, Register y_idx, Register z,
+                             Register carry, Register product,
+                             Register idx, Register kdx);
+  void multiply_64_x_64_loop(Register x, Register xstart, Register x_xstart,
+                             Register y, Register y_idx, Register z,
+                             Register carry, Register product,
+                             Register idx, Register kdx);
+  void multiply_128_x_128_loop(Register y, Register z,
+                               Register carry, Register carry2,
+                               Register idx, Register jdx,
+                               Register yz_idx1, Register yz_idx2,
+                               Register tmp, Register tmp3, Register tmp4,
+                               Register tmp6, Register product_hi);
+  void multiply_to_len(Register x, Register xlen, Register y, Register ylen,
+                       Register z, Register zlen,
+                       Register tmp1, Register tmp2, Register tmp3, Register tmp4,
+                       Register tmp5, Register tmp6, Register product_hi);
+#endif // COMPILER2
+
   virtual void _call_Unimplemented(address call_site) {
     mv(t1, call_site);
     stop("Unimplemented");
@@ -557,5 +651,7 @@ class MacroAssembler: public Assembler {
   void unimplemented(const char* what = "") { stop(what); }
   void should_not_reach_here() { stop("should not reach here"); }
 };
+
+typedef MacroAssembler C2_MacroAssembler;
 
 #endif // CPU_RISCV_VM_MACROASSEMBLER_RISCV_HPP

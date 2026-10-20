@@ -555,19 +555,19 @@ void LIRGenerator::do_ArithmeticOp_Int(ArithmeticOp* x) {
     }
 
   } else if (x->op() == Bytecodes::_iadd || x->op() == Bytecodes::_isub) {
-    if (right.is_constant() &&
-        ((x->op() == Bytecodes::_iadd && Assembler::operand_valid_for_add_immediate(right.get_jint_constant())) ||
-         (x->op() == Bytecodes::_isub && Assembler::operand_valid_for_add_immediate(-(int64_t)right.get_jint_constant())))) {
-      right.load_nonconstant();
+    if (right_arg->is_constant() &&
+        ((x->op() == Bytecodes::_iadd && Assembler::operand_valid_for_add_immediate(right_arg->get_jint_constant())) ||
+         (x->op() == Bytecodes::_isub && Assembler::operand_valid_for_add_immediate(-(int64_t)right_arg->get_jint_constant())))) {
+      right_arg->load_nonconstant();
     } else {
-      right.load_item();
+      right_arg->load_item();
     }
     rlock_result(x);
     arithmetic_op_int(x->op(), x->operand(), left_arg->result(), right_arg->result(), LIR_OprFact::illegalOpr);
   } else {
     assert(x->op() == Bytecodes::_imul, "expect imul");
-    if (right.is_constant()) {
-      jint c = right.get_jint_constant();
+    if (right_arg->is_constant()) {
+      jint c = right_arg->get_jint_constant();
       if (c > 0 && c < max_jint && (is_power_of_2(c) || is_power_of_2(c - 1) || is_power_of_2(c + 1))) {
         right_arg->dont_load_item();
       } else {
@@ -575,7 +575,7 @@ void LIRGenerator::do_ArithmeticOp_Int(ArithmeticOp* x) {
         right_arg->load_item();
       }
     } else {
-      right.load_item();
+      right_arg->load_item();
     }
     rlock_result(x);
     arithmetic_op_int(x->op(), x->operand(), left_arg->result(), right_arg->result(), new_register(T_INT));

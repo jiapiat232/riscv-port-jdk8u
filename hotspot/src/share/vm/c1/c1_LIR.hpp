@@ -2051,6 +2051,8 @@ class LIR_List: public CompilationResourceObj {
 
 #ifdef RISCV
     set_cmp_oprs(op);
+    // lir_cmp sets cmp oprs only on riscv
+    if (op->code() == lir_cmp) return;
 #endif
 
     _operations.append(op);

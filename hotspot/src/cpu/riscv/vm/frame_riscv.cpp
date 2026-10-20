@@ -282,15 +282,15 @@ void frame::verify_deopt_original_pc(nmethod* nm, intptr_t* unextended_sp, bool 
 #endif
 
 void frame::adjust_unextended_sp() {
+  // On riscv, sites calling method handle intrinsics and lambda forms are
+  // treated as any other call site. Therefore, no special action is needed
+  // when we are returning to any of these call sites.
   nmethod* sender_nm = (_cb == NULL) ? NULL : _cb->as_nmethod_or_null();
   if (sender_nm != NULL) {
-    if (sender_nm->is_deopt_mh_entry(_pc)) {
-      DEBUG_ONLY(verify_deopt_mh_original_pc(sender_nm, _fp));
-      _unextended_sp = _fp;
-    } else if (sender_nm->is_deopt_entry(_pc)) {
+    // If the sender PC is a deoptimization point, get the original PC.
+    if (sender_nm->is_deopt_entry(_pc) ||
+        sender_nm->is_deopt_mh_entry(_pc)) {
       DEBUG_ONLY(verify_deopt_original_pc(sender_nm, _unextended_sp));
-    } else if (sender_nm->is_method_handle_return(_pc)) {
-      _unextended_sp = _fp;
     }
   }
 }

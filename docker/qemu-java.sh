@@ -12,6 +12,17 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export PATH="$HOME/.docker/bin:$PATH"
 IMAGE_NAME="jdk8u-riscv-builder:latest"
 
+if [ -f "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/hotspot/linux_riscv64_compiler2/debug/libjvm.so" ]; then
+  if [ -d "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/jdk/lib/riscv64/server" ]; then
+    cp -f "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/hotspot/linux_riscv64_compiler2/debug/libjvm.so" \
+          "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/jdk/lib/riscv64/server/libjvm.so"
+  fi
+  if [ -d "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/images/j2sdk-image/jre/lib/riscv64/server" ]; then
+    cp -f "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/hotspot/linux_riscv64_compiler2/debug/libjvm.so" \
+          "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/images/j2sdk-image/jre/lib/riscv64/server/libjvm.so"
+  fi
+fi
+
 if [ -f "${REPO_ROOT}/build/linux-riscv64-normal-server-slowdebug/images/j2sdk-image/bin/java" ]; then
   JAVA_PATH_IN_CONTAINER="/workspace/build/linux-riscv64-normal-server-slowdebug/images/j2sdk-image/bin/java"
 else

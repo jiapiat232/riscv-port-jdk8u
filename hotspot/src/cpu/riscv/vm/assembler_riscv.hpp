@@ -542,6 +542,11 @@ class Assembler : public AbstractAssembler {
   void fsgnjn_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0010001, rs2, rs1, 0b001, rd, OP_FP)); }
   void fsgnjx_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2) { emit_int32(encode_r_fp(0b0010001, rs2, rs1, 0b010, rd, OP_FP)); }
 
+  void fmin_s(FloatRegister rd, FloatRegister rs1, FloatRegister rs2)   { emit_int32(encode_r_fp(0b0010100, rs2, rs1, 0b000, rd, OP_FP)); }
+  void fmax_s(FloatRegister rd, FloatRegister rs1, FloatRegister rs2)   { emit_int32(encode_r_fp(0b0010100, rs2, rs1, 0b001, rd, OP_FP)); }
+  void fmin_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2)   { emit_int32(encode_r_fp(0b0010101, rs2, rs1, 0b000, rd, OP_FP)); }
+  void fmax_d(FloatRegister rd, FloatRegister rs1, FloatRegister rs2)   { emit_int32(encode_r_fp(0b0010101, rs2, rs1, 0b001, rd, OP_FP)); }
+
   // Floating-point moves between GPR and FPR
   void fmv_w_x(FloatRegister rd, Register rs1) { emit_int32(encode_r_gpr_to_fp(0b1111000, noreg, rs1, 0b000, rd, OP_FP)); }
   void fmv_x_w(Register rd, FloatRegister rs1) { emit_int32(encode_r_fp_to_gpr(0b1110000, fnoreg, rs1, 0b000, rd, OP_FP)); }
@@ -628,6 +633,11 @@ class Assembler : public AbstractAssembler {
   }
 
   virtual void bang_stack_with_offset(int offset);
+
+  class CompressibleRegion {
+  public:
+    CompressibleRegion(Assembler*) {}
+  };
 };
 
 #endif // CPU_RISCV_VM_ASSEMBLER_RISCV_HPP

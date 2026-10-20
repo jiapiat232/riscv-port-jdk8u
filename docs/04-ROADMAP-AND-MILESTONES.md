@@ -20,22 +20,101 @@
 
 ---
 
-## 二、阶段里程碑全景图
+## 二、阶段里程碑全景图与真实代码依赖 DAG（Dependency DAG）
+
+### 1. 路线图反思与纠偏：从“主观功能划分”走向“真实代码依赖 DAG”
+
+在推进到 C1 竣工并切入 C2 编译器（Phase 5）时，我们结合本仓 **JDK 1.8 真实代码架构**（[`hotspot/src/share/vm/opto/`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/opto/)、[`adlc/`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/adlc/)、[`aarch64.ad`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/aarch64.ad)）与 **JDK 19 具体实现**（[`/Users/wujiahua/code/jdk19/src/hotspot/cpu/riscv/riscv.ad`](file:///Users/wujiahua/code/jdk19/src/hotspot/cpu/riscv/riscv.ad)），对先前的理论路线图进行了深刻反思，纠正了两大主观误区：
+
+* **纠偏 1（关于 GC 屏障在三大执行引擎中的真实架构位置）**：
+  * 先前路线图主观地将“CMS 与 G1 写屏障”单独列为夹在 C1 与 C2 之间的 Phase 4，并以为 C2 也需要在 `riscv64.ad` 中手写一套 G1 SATB / Dirty Card 汇编屏障。
+  * **代码真相**：
+    1. 在解释器与 Stubs 层（Phase 2.6）以及 C1 LIR 层（Phase 3.2），GC 屏障确实是平台相关的汇编逻辑（[`MacroAssembler::g1_write_barrier_pre/post`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp) 与 [`G1Pre/PostBarrierStub`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_CodeStubs_riscv.cpp)），且我们已在 Phase 2.6 与 Phase 3.2 中 **100% 实现了四大 GC（Serial / Parallel / CMS / G1）在解释器与 C1 下的写屏障并验证通过**！
+    2. 而在 **JDK 8u 的 C2 编译器**（以及 JEP 475 之前的 JDK 19）中，G1 SATB 预写屏障、G1 Dirty Card 写后屏障与 CardTable 写后屏障是在**平台无关的 Ideal Graph 阶段**（[`GraphKit::g1_write_barrier_pre/post`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/opto/graphKit.cpp#L3775-L4070)、`write_barrier_post`）直接展开为基础 Ideal 节点的（`LoadP`, `LoadB`, `StoreB`, `StoreCM`, `If`, `CallLeafNoFP`, `ThreadLocal`, `CastP2X`, `URShiftX`）！
+    3. 因此，`riscv64.ad` 根本不需要手写 G1 屏障汇编，它对 GC 屏障唯一的专属节点依赖是匹配 `Op_StoreCM`（即 `storeCM` 与 `storeCM_CMS` 两条规则）！
+* **纠偏 2（关于 C2 编译器的真实前置依赖）**：
+  * 先前路线图以为 C2 仅仅是编写 `riscv64.ad`。
+  * **代码真相**：C2 生成的编译方法在运行期重度依赖两个此前仅留了空桩/假桩的底层 Runtime Blob——**`OptoRuntime::generate_exception_blob()`** 与 **`SharedRuntime::generate_uncommon_trap_blob()`**，且在代码发射层面临 **JDK 8 ADLC 硬编码生成 `MacroAssembler _masm(&cbuf)` vs JDK 19 `C2_MacroAssembler`**、**`Compile` vs `PhaseOutput` API 拆分**、**RISC-V 无硬件条件传送指令下的 `ConditionalMoveLimit=0` 约束** 等 8 大跨代架构鸿沟。
+
+### 2. 全周期里程碑演进图
 
 ```mermaid
 flowchart TD
-    P0["【Phase 0】构建脚手架与 Docker 交叉编译闭环<br/>(状态: 100% 已完成)"]
-    P1["【Phase 1】底层汇编器、寄存器与 OS/CPU 粘合<br/>(状态: 100% 已完成, 66/66 GNU as 差分单测通过)"]
+    P0["【Phase 0】构建脚手架与 Docker 交叉编译闭环<br/>(100% 已完成)"]
+    P1["【Phase 1】底层汇编器、寄存器与 OS/CPU 粘合<br/>(100% 已完成, 66/66 GNU as 差分单测通过)"]
     P2_1["【Phase 2.1~2.5】模板解释器与基础运行时 Stubs<br/>(Milestone 1 已达成: -Xint -version / HelloWorld)"]
-    P2_6["【Phase 2.6】底层运行时基座加固: 四大GC屏障/Safepoint/OopMap/偏向锁<br/>(Milestone 1.5 已达成: -Xint 四大GC跑通 javac 自举编译)"]
-    P3_0["【Phase 3.0】代码修补、重定位与内联缓存/蹦床层<br/>(状态: 100% 已完成)"]
-    P3_1["【Phase 3.1】C1 基础组件与 Runtime1 桩<br/>(状态: 100% 已完成)"]
-    P3_2["【Phase 3.2】C1 LIR 生成器与汇编器及四大GC屏障<br/>(Milestone 2 已达成: -XX:TieredStopAtLevel=1 & -Xcomp 四大GC全通)"]
-    P4["【Phase 4】C1 & Runtime 并发 GC 与反优化高压验证<br/>(Milestone 3: 通过 G1/CMS 并发标记与偏向锁撤销压测)"]
-    P5["【Phase 5】C2 服务端编译器与 riscv64.ad 架构定义<br/>(Milestone 4: 全功能分层编译 TieredCompilation)"]
-    P6["【Phase 6】现代硬件特性: RVC加固、Zba/Zbb、RVV 1.0<br/>(Final Milestone: 达到生产级发布标准)"]
+    P2_6["【Phase 2.6】运行时基座加固: 四大GC屏障/Safepoint/OopMap/偏向锁<br/>(Milestone 1.5 已达成: -Xint 四大GC跑通 javac 自举编译)"]
+    P3_0["【Phase 3.0】代码修补、重定位与内联缓存/蹦床层<br/>(100% 已完成)"]
+    P3_1["【Phase 3.1】C1 FrameMap、C1_MacroAssembler 与 Runtime1 桩<br/>(100% 已完成)"]
+    P3_2["【Phase 3.2】C1 LIR 生成器/汇编器、逆优化与四大GC验证<br/>(Milestone 2 已达成: C1 Tier 1 & -Xcomp 四大GC 8/8 全通)"]
+    P5["【Phase 5】C2 服务端编译器 DAG 五层攻坚与 riscv64.ad<br/>(Milestone 4 已达成: 纯 C2 / 纯 C1 / Tiered Level 0~4 四大GC + javac 全通)"]
+    P6["【Phase 6】现代硬件特性(RVC/Zba/Zbb/RVV)与全量压测加固<br/>(Final Milestone: jtreg / 大型负载生产级验收)"]
 
-    P0 --> P1 --> P2_1 --> P2_6 --> P3_0 --> P3_1 --> P3_2 --> P4 --> P5 --> P6
+    P0 --> P1 --> P2_1 --> P2_6 --> P3_0 --> P3_1 --> P3_2 --> P5 --> P6
+```
+
+### 3. Phase 5（C2 服务端编译器）五层真实代码依赖 DAG
+
+```mermaid
+flowchart TD
+    subgraph L0["Layer 0: Runtime Blobs & Frame 基座层 (C2 运行期前置依赖)"]
+        L0_1["frame::adjust_unextended_sp 修复<br/>(frame_riscv.cpp: 移除错误的 _unextended_sp = _fp)"]
+        L0_2["SharedRuntime::generate_uncommon_trap_blob<br/>(sharedRuntime_riscv.cpp: 完整解包栈帧循环 + PC相对 retaddr)"]
+        L0_3["OptoRuntime::generate_exception_blob<br/>(sharedRuntime_riscv.cpp: C2 异常捕获/栈展开跳板 Blob)"]
+        L0_4["c2_globals_riscv.hpp 参数契约<br/>(ConditionalMoveLimit = 0, 对齐无硬件 cmov 架构)"]
+    end
+
+    subgraph L1["Layer 1: MacroAssembler C2 编码原语层 (消除 ADLC _masm 类型鸿沟)"]
+        L1_1["spill / unspill / unspillu 栈槽读写辅助原语<br/>(macroAssembler_riscv.hpp/cpp)"]
+        L1_2["cmp_branch / float_cmp_branch / enc_cmp*_imm0_branch<br/>(C2 短跳与远跳自适应比较分支原语)"]
+        L1_3["enc_cmove / minmax_FD / clear_upper_bits<br/>(条件传送分支模拟与 IEEE-754 NaN/±0.0 浮点极值)"]
+        L1_4["typedef MacroAssembler C2_MacroAssembler<br/>(桥接 JDK 8 ADLC MacroAssembler _masm 与 JDK 19 enc_class)"]
+    end
+
+    subgraph L2["Layer 2: riscv64.ad 寄存器、栈帧、流水线与 Source Block 骨架层"]
+        L2_1["REGISTER BLOCK: R0..R31, F0..F31 双槽位与 RFLAGS(x6/t1)<br/>(剔除 JDK 8 不存在的 Op_VecA / V0..V31 RVV 寄存器)"]
+        L2_2["SOURCE_HPP / SOURCE BLOCK: Compile 直调适配<br/>(将 JDK 19 C->output()->* 还原为 JDK 8 C->*)"]
+        L2_3["MachProlog / MachEpilog / BoxLock / MachUEP / MachSpillCopy<br/>(适配 JDK 8 全局页 read_polling_page 与 needs_polling_address_input)"]
+        L2_4["Matcher 接口契约与 match_rule_supported<br/>(关闭依赖 JEP 254 Compact Strings 的按字节字符串内联节点)"]
+        L2_5["ENCODE BLOCK: call_epilog / 内存读写 / FastLock(含偏向锁回退)"]
+    end
+
+    subgraph L3["Layer 3: riscv64.ad Operands & Instructions 匹配规则层"]
+        L3_1["Operands & Memory Operands<br/>(iRegI/L/P/N, fRegF/D, indOffset12, indIndex, Universe 常量等)"]
+        L3_2["算术/逻辑/位运算/类型转换/Load/Store/StoreCM 指令集<br/>(含 GC 卡表屏障 storeCM / storeCM_CMS)"]
+        L3_3["分支跳转/表跳转/CallStaticJava/CallDynamicJava/CallRuntime/CallLeaf<br/>(对接 trampoline_call 与 OptoRuntime::exception_blob)"]
+        L3_4["原子 CAS (CompareAndSwapI/L/P/N) & GetAndAdd/GetAndSet<br/>(剔除 JDK 9+ CompareAndExchange / WeakCAS / Fma / CastVV 等 26 个节点)"]
+        L3_5["防御性补齐 CMoveP / CMoveN / CMoveF / CMoveD<br/>(防止显式指定 ConditionalMoveLimit>0 时匹配失败)"]
+    end
+
+    subgraph L4["Layer 4: 清理 compiler_stubs、ADLC 生成编译与全矩阵验证"]
+        L4_1["清空 compiler_stubs_riscv.cpp 中 #ifdef COMPILER2 全部临时桩"]
+        L4_2["ADLC 编译生成 ad_riscv64.cpp/hpp & dfa_riscv64.cpp 并链接 libjvm.so"]
+        L4_3["纯 C2 (-XX:-TieredCompilation) & 分层编译 (Tier 0~4) 四大 GC 验证"]
+    end
+
+    L0_1 --> L0_2
+    L0_1 --> L0_3
+    L0_2 --> L2_3
+    L0_3 --> L3_3
+    L0_4 --> L3_5
+    L1_1 --> L2_3
+    L1_1 --> L2_5
+    L1_2 --> L2_5
+    L1_3 --> L2_5
+    L1_4 --> L2_2
+    L2_1 --> L3_1
+    L2_2 --> L3_2
+    L2_3 --> L4_1
+    L2_4 --> L3_2
+    L2_5 --> L3_2
+    L2_5 --> L3_3
+    L3_1 --> L3_2
+    L3_2 --> L4_1
+    L3_3 --> L4_1
+    L3_4 --> L4_1
+    L3_5 --> L4_1
+    L4_1 --> L4_2 --> L4_3
 ```
 
 ---
@@ -138,26 +217,35 @@ flowchart TD
 
 ---
 
-### 【Phase 4：C1 & Runtime 并发 GC 与反优化高压验证】
-* **核心目标**：在解释器 + C1 混合模式下，对 G1/CMS 并发标记、高频反优化（Deoptimization）、偏向锁批量重偏向/撤销、OSR（栈上替换）进行全方位压力验证与边界修复。
-* **具体任务**：
-  1. 验证 C1 `G1PreBarrierStub` / `G1PostBarrierStub` 在并发标记周期中的慢速队列刷新；
-  2. 验证 C1 编译代码触发反优化（`UncommonTrap` / `Deoptimization`）回退至解释器时的栈帧解包（`frame::sender_for_compiled_frame` 与 `deopt_blob`）；
-  3. 跑通复杂长稳压力测试与 `javac` 大规模编译任务。
-* **验收标准（Milestone 3）**：
-  * 在 `-XX:TieredStopAtLevel=1` 配合 `-XX:+UseG1GC` 与 `-XX:+UseConcMarkSweepGC` 下稳定完成高强度并发分配与 `javac` 编译，0 崩溃、0 堆损坏。
-
----
-
-### 【Phase 5：C2 服务端编译器与 riscv64.ad 架构定义】
-* **核心目标**：实现终极 JIT 编译器 C2（Server Compiler），达到与 x86-64 / AArch64 比肩的峰值运行性能。
-* **具体任务**：
-  1. 构建架构描述文件 `hotspot/src/cpu/riscv/vm/riscv64.ad`；
-  2. 跨越 **JDK 8 ADLC vs JDK 19 ADLC 架构鸿沟**：裁剪 JDK 19 `riscv.ad` 中引入的非 JDK 8 MachNode（如 `CompressBits`、ZGC/Shenandoah 屏障、新 Vector API 节点），回填 JDK 8u 的 CardTable / G1 写屏障匹配规则；
-  3. 定义完备的指令匹配规则（Instruction Match Rules）、操作数约束（Operands）、寄存器掩码（RegMask）与管道调度（Pipeline Models）。
-* **验收标准（Milestone 4）**：
-  * 成功启用完整的分层编译机制（`-XX:+TieredCompilation`）与纯 C2 模式（`-XX:-TieredCompilation`）；
-  * 跑通复杂 Java 应用与基准测试负载。
+### 【Phase 5：C2 服务端编译器 DAG 五层攻坚与 riscv64.ad 架构定义】（已完成 100%，Milestone 4 达成）
+* **核心目标**：基于真实代码依赖 DAG（Layer 0 ~ Layer 4），实现终极 JIT 编译器 C2（Server Compiler），打通完整分层编译（Tier 0 ~ Tier 4）与纯 C2 编译模式。
+* **五层递进实施路径与 14 大跨代/跨层架构鸿沟跨越**：
+  1. **Layer 0（Runtime Blobs、Frame 与跨层调用桩基座层）**：
+     - 修复 [`frame_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/frame_riscv.cpp) `frame::adjust_unextended_sp()`（对齐 JDK 19 RISC-V：MethodHandle 调用不修改 `sp` 且不保存在 `fp` 中，移除错误的 `_unextended_sp = _fp`）；
+     - 在 [`sharedRuntime_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp) 完整实现 `SharedRuntime::generate_uncommon_trap_blob()`（适配 JDK 8 双参数 `Deoptimization::uncommon_trap(thread, trap_request)` + PC 相对 `retaddr` + 多帧解包循环 + 补齐调用者保存的 `xthread` 恢复 `__ ld(xthread, Address(sp, RegisterSaver::xthread_offset_in_bytes()))`）；
+     - 在 [`sharedRuntime_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp) 完整实现 `OptoRuntime::generate_exception_blob()`（解决 `HandlerImpl::emit_exception_handler` 对 `OptoRuntime::exception_blob()->entry_point()` 的强依赖，并在 `call_VM_leaf` 后恢复被 C++ ABI 视为临时寄存器的 `xthread`）；
+     - 在 [`vtableStubs_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/vtableStubs_riscv.cpp) 修复 `VtableStubs::create_itable_stub` 寄存器约定鸿沟：原代码误用 `x18(s2)`、`x19(s3)` 作为临时寄存器，而 C1 线性扫描分配器将 `s2..s6` 等视为跨调用存活的 Callee-saved 寄存器，导致 `ComparableTimSort` 通过 `itable_stub` 调用 `Comparable.compareTo` 时局部变量被篡改为窄 Klass 指针；现已全部切换为 Caller-saved 临时寄存器 `t2(x7)`, `t3(x28)`, `t4(x29)`, `t5(x30)`；
+     - 在 [`stubGenerator_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/stubGenerator_riscv.cpp) 修复 `_oop_arraycopy` / `_oop_disjoint_arraycopy` 压缩指针步长鸿沟：将元素大小从编译期常量 `sizeof(oop)`（8 字节）修正为运行期动态判断 `UseCompressedOops ? sizeof(narrowOop) : sizeof(oop)`（压缩指针下 4 字节），彻底消除引用数组拷贝越界覆盖相邻数组元素与堆中紧邻对象头的致命 Bug；
+     - 在 [`c2_globals_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c2_globals_riscv.hpp) 将 `ConditionalMoveLimit` 设为 `0`（对齐 RISC-V 无硬件 `cmov` 特性）。
+  2. **Layer 1（`MacroAssembler` C2 编码原语层）**：
+     - 跨越 **JDK 8 ADLC 硬编码 `MacroAssembler _masm(&cbuf)` vs JDK 19 `C2_MacroAssembler` 鸿沟**：在 [`macroAssembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp) / [`macroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp) 中合入 `spill`、`unspill`、`unspillu`、`cmp_branch`、`float_cmp_branch`、`enc_cmpUEqNeLeGt_imm0_branch`、`enc_cmpEqNe_imm0_branch`、`enc_cmove`、`minmax_FD`，并定义 `typedef MacroAssembler C2_MacroAssembler;`；
+     - 修复 `NativeCallTrampolineStub::destination` 未重定位读取陷阱：在 [`macroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp) 中修正 `emit_trampoline_stub` 使其在发射 `emit_int64((intptr_t)dest.target())` 前绑定 `trampoline_stub_Relocation`，解决 C2 PhaseOutput 临时 `CodeBuffer` 扩展复制时读取错位目标地址的问题。
+  3. **Layer 2（`riscv64.ad` 寄存器、栈帧、流水线与 Source Block 骨架层）**：
+     - 跨越 **JDK 14 `PhaseOutput` 拆分 vs JDK 8 `Compile` 单体类鸿沟**：将 `C->output()->*` 全部还原为 `C->*`；
+     - 跨越 **JDK 10 线程局部轮询 vs JDK 8 全局轮询页鸿沟**：在 `MachEpilogNode::emit` 中使用 `read_polling_page(t0, os::get_polling_page(), relocInfo::poll_return_type)` 并实现 `SafePointNode::needs_polling_address_input() { return true; }`；
+     - 跨越 **JDK 8 ADLC `MachOper::edges` 生成规则 vs `tlsLoadP` 鸿沟**：在 JDK 8u 中，ADLC 不会为 `ThreadLocal` 叶子节点生成 `MachOper::num_edges()`，导致 `tlsLoadP(thread_reg dst)` 将 `dst` 当作输入操作数并在 `PhaseChaitin` 寄存器分配中读取越界边；通过 `instruct tlsLoadP(iRegPNoSp dst)` 显式绑定 `$dst$$reg` 为 `xthread` 彻底解决；
+     - 跨越 **`Compile::ConstantTable::calculate_table_base_offset()` 常量表偏移契约鸿沟**：在 JDK 19 中该函数返回 `0`，而 JDK 8 默认实现返回常量表大小的一半，导致 `$constanttablebase` + `$constantoffset` 双重叠加偏移从而加载错误的浮点/长整数字面量；已在 [`riscv64.ad`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/riscv64.ad) 中显式返回 `0`；
+     - 跨越 **JDK 8 C2 `CallLeafNoFP` 寄存器掩码与 `Save_Fp_Only_Registers` 契约鸿沟**：在 JDK 8u 的 [`callnode.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/opto/callnode.cpp#L604) 中，`CallLeafNoFPNode`（如 G1 屏障慢路径 `g1_wb_pre` / `g1_wb_post`）被认为在通用寄存器上为 `Save_All_Registers`（不杀死 `a0..a7`）！若 C++ 慢路径直接覆盖 `a0..a7`，C2 分配在 `a0..a7` 中的存活变量将被静默破坏。通过在 `rt_call`（`CallLeaf` / `CallLeafNoFP`）前后围绕 C++ 调用保存并恢复 `RegSet::range(x10, x17)` 彻底闭合该契约；
+     - 跨越 **JEP 254 Compact Strings 鸿沟**：在 `Matcher::match_rule_supported` 中禁用依赖 JDK 9+ byte 编码假设的 `Op_StrComp`/`Op_StrEquals`/`Op_StrIndexOf`/`Op_AryEq` 节点，让 C2 自动内联标准 `char[]` 字节码；
+     - 在 `riscv_enc_fast_lock` / `riscv_enc_fast_unlock` 中支持 `!UseOptoBiasInlining` 时的偏向锁回退。
+  4. **Layer 3（`riscv64.ad` Operands 与 Instructions 匹配规则层 + C1 分层协同加固）**：
+     - 剔除 JDK 9+ 新增的 26 个 Ideal 节点（`CompareAndExchange*`、`WeakCompareAndSwap*`、`Fma*`、`Min/MaxF/D`、`CastVV` 等），保留全部 JDK 8 核心指令与 GC 卡表 `storeCM` / `storeCM_CMS` 规则，并防御性补齐 `CMoveP/N/F/D`；
+     - 修复分层编译下 C1 协同组件：在 [`c1_LIRAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_LIRAssembler_riscv.cpp) 中修复 `casw`/`caswu`/`casl` 的 `emit_compare_and_swap` 寄存器冲突（`t0` vs `t1`）与 `seqz + membar` 布尔结果转换，以及 `arraycopy_type_check` 慢速子类型检查返回值寄存器（`dst` vs `src`）与 `layout_helper` 有符号加载（`lw` vs `lwu`）。
+  5. **Layer 4（清理桩代码、ADLC 生成编译与四大 GC 验收）**：
+     - 移除 [`compiler_stubs_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/compiler_stubs_riscv.cpp) 中全部 `#ifdef COMPILER2` 临时桩，通过 ADLC 生成并链接 `libjvm.so`。
+* **验收结果（Milestone 4 达成）**：
+  * 零 `CompileCommand=exclude` 逃生舱规则下，在纯 C1（`-XX:TieredStopAtLevel=1`）、纯 C2（`-XX:-TieredCompilation`）与完整分层编译（`-XX:+TieredCompilation` Level 0~4）三种模式下 **100% 跑通 RISC-V `javac` 自举编译**；
+  * 在四大 GC（Serial / Parallel / CMS / G1）× 两种服务端编译模式（纯 C2 与完整分层编译）共 8 组矩阵及 `-Xcomp -XX:-TieredCompilation` 下 **100% 跑通 [`ComprehensiveTest`](file:///Users/wujiahua/code/riscv-port-jdk8u/ComprehensiveTest.java)**！
 
 ---
 

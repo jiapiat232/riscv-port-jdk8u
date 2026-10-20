@@ -452,19 +452,6 @@ OopMapSet* Runtime1::generate_handle_exception(StubID id, StubAssembler *sasm) {
       restore_live_registers(sasm, id != handle_exception_nofpu_id);
       break;
     case handle_exception_from_callee_id:
-      // Pop the return address since we are possibly changing SP (restoring from FP).
-      __ leave();
-
-      // Restore SP from FP if the exception PC is a method handle call site.
-      {
-        Label nope;
-        __ lw(t0, Address(xthread, JavaThread::is_method_handle_return_offset()));
-        __ beqz(t0, nope);
-        __ mv(sp, x22); // x22 (s6) holds saved SP around method handle calls, or fp if standard
-        __ bind(nope);
-      }
-
-      __ ret(); // jump to exception handler
       break;
     default: ShouldNotReachHere();
   }
@@ -1094,7 +1081,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
 
     case handle_exception_from_callee_id:
       {
-        StubFrame f(sasm, "handle_exception_from_callee", dont_gc_arguments, does_not_return);
+        StubFrame f(sasm, "handle_exception_from_callee", dont_gc_arguments);
         oop_maps = generate_handle_exception(id, sasm);
       }
       break;
