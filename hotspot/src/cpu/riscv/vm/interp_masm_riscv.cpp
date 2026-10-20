@@ -398,7 +398,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
     // least significant 3 bits clear.
     // NOTE: the oopMark is in swap_reg (x10) as the result of cmpxchg_obj_header
     sub(swap_reg, swap_reg, sp);
-    movptr(t0, (intptr_t)(7 - os::vm_page_size()));
+    li(t0, (intptr_t)(7 - os::vm_page_size()));
     andr(swap_reg, swap_reg, t0);
 
     // Save the test result, for recursive case, the result is zero
@@ -642,7 +642,7 @@ void InterpreterMacroAssembler::increment_mask_and_jump(Address counter_addr,
   }
   addi(tmp1, tmp1, increment);
   sw(tmp1, counter_addr);
-  movptr(tmp2, mask);
+  li(tmp2, mask);
   andr(tmp1, tmp1, tmp2);
   bnez(tmp1, done);
   j(*where);

@@ -105,7 +105,9 @@ char* os::non_memory_address_word() {
   // Must never look like an address returned by reserve_memory,
   // even in its subfields (as defined by the CPU immediate fields,
   // if the CPU splits constants across multiple instructions).
-  return (char*) 0xffffffffffff;
+  // Note: On RV64, movptr uses sign-extended lui+addi+slli+addi+slli+addi,
+  // which supports 47-bit unsigned addresses or -1 (0xffffffffffffffff).
+  return (char*) -1;
 }
 
 void os::initialize_thread(Thread *thr) {

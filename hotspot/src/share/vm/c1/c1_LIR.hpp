@@ -542,14 +542,14 @@ class LIR_Address: public LIR_OprPtr {
      , _type(type)
      , _disp(0) { verify(); }
 
-#if defined(X86) || defined(ARM) || defined(AARCH64)
+#if defined(X86) || defined(ARM) || defined(AARCH64) || defined(RISCV)
   LIR_Address(LIR_Opr base, LIR_Opr index, Scale scale, intx disp, BasicType type):
        _base(base)
      , _index(index)
      , _scale(scale)
      , _type(type)
      , _disp(disp) { verify(); }
-#endif // X86 || ARM
+#endif // X86 || ARM || AARCH64 || RISCV
 
   LIR_Opr base()  const                          { return _base;  }
   LIR_Opr index() const                          { return _index; }
@@ -1432,6 +1432,10 @@ class LIR_OpBranch: public LIR_Op {
   BlockBegin*   _block;  // if this is a branch to a block, this is the block
   BlockBegin*   _ublock; // if this is a float-branch, this is the unorderd block
   CodeStub*     _stub;   // if this is a branch to a stub, this is the stub
+#ifdef RISCV
+  LIR_Opr       _opr1;
+  LIR_Opr       _opr2;
+#endif
 
  public:
   LIR_OpBranch(LIR_Condition cond, BasicType type, Label* lbl)
@@ -1441,7 +1445,12 @@ class LIR_OpBranch: public LIR_Op {
     , _label(lbl)
     , _block(NULL)
     , _ublock(NULL)
-    , _stub(NULL) { }
+    , _stub(NULL)
+#ifdef RISCV
+    , _opr1(LIR_OprFact::illegalOpr)
+    , _opr2(LIR_OprFact::illegalOpr)
+#endif
+  { }
 
   LIR_OpBranch(LIR_Condition cond, BasicType type, BlockBegin* block);
   LIR_OpBranch(LIR_Condition cond, BasicType type, CodeStub* stub);
@@ -1455,6 +1464,12 @@ class LIR_OpBranch: public LIR_Op {
   BlockBegin*   block()       const              { return _block;       }
   BlockBegin*   ublock()      const              { return _ublock;      }
   CodeStub*     stub()        const              { return _stub;       }
+#ifdef RISCV
+  LIR_Opr       in_opr1()     const              { return _opr1;        }
+  LIR_Opr       in_opr2()     const              { return _opr2;        }
+  void          set_in_opr1(LIR_Opr opr)         { _opr1 = opr;         }
+  void          set_in_opr2(LIR_Opr opr)         { _opr2 = opr;         }
+#endif
 
   void          change_block(BlockBegin* b);
   void          change_ublock(BlockBegin* b);
@@ -1730,6 +1745,10 @@ class LIR_Op2: public LIR_Op {
 
   void set_in_opr1(LIR_Opr opr)                  { _opr1 = opr; }
   void set_in_opr2(LIR_Opr opr)                  { _opr2 = opr; }
+#ifdef RISCV
+  void set_tmp1_opr(LIR_Opr opr)                 { _tmp1 = opr; }
+  void set_tmp2_opr(LIR_Opr opr)                 { _tmp2 = opr; }
+#endif
 
   virtual void emit_code(LIR_Assembler* masm);
   virtual LIR_Op2* as_Op2() { return this; }
@@ -2015,6 +2034,10 @@ class LIR_List: public CompilationResourceObj {
   const char *  _file;
   int           _line;
 #endif
+#ifdef RISCV
+  LIR_Opr       _cmp_opr1;
+  LIR_Opr       _cmp_opr2;
+#endif
 
   void append(LIR_Op* op) {
     if (op->source() == NULL)
@@ -2025,6 +2048,10 @@ class LIR_List: public CompilationResourceObj {
       op->print(); tty->cr();
     }
 #endif // PRODUCT
+
+#ifdef RISCV
+    set_cmp_oprs(op);
+#endif
 
     _operations.append(op);
 
@@ -2041,6 +2068,10 @@ class LIR_List: public CompilationResourceObj {
 
 #ifdef ASSERT
   void set_file_and_line(const char * file, int line);
+#endif
+
+#ifdef RISCV
+  void set_cmp_oprs(LIR_Op* op);
 #endif
 
   //---------- accessors ---------------

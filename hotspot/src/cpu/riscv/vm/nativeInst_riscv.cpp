@@ -103,8 +103,8 @@ bool NativeInstruction::is_pc_relative_at(address branch) {
     case 0b0010011: // OP-IMM (addi)
     case 0b1100111: // JALR
       return funct3 == 0b000;
-    case 0b0000011: // LOAD (lw, ld, lwu)
-      return funct3 == 0b010 || funct3 == 0b011 || funct3 == 0b110;
+    case 0b0000011: // LOAD (lb, lh, lw, ld, lbu, lhu, lwu)
+      return true;
     case 0b0000111: // LOAD-FP (flw, fld)
       return funct3 == 0b010 || funct3 == 0b011;
     default:
@@ -125,7 +125,7 @@ bool NativeInstruction::is_load_pc_relative_at(address branch) {
 //   8: slli  rd, rd, 11
 //  12: addi  rd, rd, imm11
 //  16: slli  rd, rd, 6
-//  20: addi/jalr/ld rd/zr/ra, rd, imm6
+//  20: addi/jalr/load rd/zr/ra, rd, imm6
 bool NativeInstruction::is_movptr_at(address branch) {
   address i0 = branch;
   address i1 = branch + instruction_size;
@@ -146,7 +146,7 @@ bool NativeInstruction::is_movptr_at(address branch) {
   uint32_t f5  = extract_funct3(i5);
   bool valid_i5 = (op5 == 0b0010011 && f5 == 0b000) || // addi
                   (op5 == 0b1100111 && f5 == 0b000) || // jalr
-                  (op5 == 0b0000011 && f5 == 0b011);   // ld
+                  (op5 == 0b0000011);                  // any load (lb/lh/lw/ld/lbu/lhu/lwu)
   if (!valid_i5) return false;
 
   Register rd = extract_rd(i0);
@@ -247,11 +247,9 @@ address NativeCall::get_trampoline() {
     return jal_destination;
   }
 
-  if (code->is_nmethod()) {
-    return trampoline_stub_Relocation::get_trampoline_for(call_addr, (nmethod*)code);
-  }
-
-  return NULL;
+  // If the codeBlob is not a nmethod, this is because we get here from the
+  // CodeBlob constructor, which is called within the nmethod constructor.
+  return trampoline_stub_Relocation::get_trampoline_for(call_addr, (nmethod*)code);
 }
 
 // If the instructions are copied and was not relocated yet, generate a trampoline jump.
@@ -378,9 +376,12 @@ address NativeJump::jump_destination() const {
   address dest = MacroAssembler::target_addr_for_insn(instruction_address());
 
   // We use jump to self as the unresolved address which the inline
-  // cache code (and relocs) know about
-  // return -1 if jump to self
-  dest = (dest == (address)this) ? (address)-1 : dest;
+  // cache code (and relocs) know about.
+  // As a special case we also use sequence movptr_with_offset(r,0), jalr(r,0)
+  // i.e. jump to 0 when we need to leave space for a wide immediate load.
+  if ((dest == (address)this) || dest == 0) {
+    dest = (address)-1;
+  }
   return dest;
 }
 

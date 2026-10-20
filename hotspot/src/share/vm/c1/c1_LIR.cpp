@@ -149,7 +149,7 @@ void LIR_Address::verify0() const {
 #endif
 #ifdef _LP64
   assert(base()->is_cpu_register(), "wrong base operand");
-#ifndef AARCH64
+#if !defined(AARCH64) && !defined(RISCV)
   assert(index()->is_illegal() || index()->is_double_cpu(), "wrong index operand");
 #else
   assert(index()->is_illegal() || index()->is_double_cpu() || index()->is_single_cpu(), "wrong index operand");
@@ -309,7 +309,12 @@ LIR_OpBranch::LIR_OpBranch(LIR_Condition cond, BasicType type, BlockBegin* block
   , _label(block->label())
   , _block(block)
   , _ublock(NULL)
-  , _stub(NULL) {
+  , _stub(NULL)
+#ifdef RISCV
+  , _opr1(LIR_OprFact::illegalOpr)
+  , _opr2(LIR_OprFact::illegalOpr)
+#endif
+{
 }
 
 LIR_OpBranch::LIR_OpBranch(LIR_Condition cond, BasicType type, CodeStub* stub) :
@@ -319,7 +324,12 @@ LIR_OpBranch::LIR_OpBranch(LIR_Condition cond, BasicType type, CodeStub* stub) :
   , _label(stub->entry())
   , _block(NULL)
   , _ublock(NULL)
-  , _stub(stub) {
+  , _stub(stub)
+#ifdef RISCV
+  , _opr1(LIR_OprFact::illegalOpr)
+  , _opr2(LIR_OprFact::illegalOpr)
+#endif
+{
 }
 
 LIR_OpBranch::LIR_OpBranch(LIR_Condition cond, BasicType type, BlockBegin* block, BlockBegin* ublock)
@@ -330,6 +340,10 @@ LIR_OpBranch::LIR_OpBranch(LIR_Condition cond, BasicType type, BlockBegin* block
   , _block(block)
   , _ublock(ublock)
   , _stub(NULL)
+#ifdef RISCV
+  , _opr1(LIR_OprFact::illegalOpr)
+  , _opr2(LIR_OprFact::illegalOpr)
+#endif
 {
 }
 
@@ -576,6 +590,11 @@ void LIR_OpVisitState::visit(LIR_Op* op) {
       assert(op->as_OpBranch() != NULL, "must be");
       LIR_OpBranch* opBranch = (LIR_OpBranch*)op;
 
+#ifdef RISCV
+      if (opBranch->_opr1->is_valid()) do_input(opBranch->_opr1);
+      if (opBranch->_opr2->is_valid()) do_input(opBranch->_opr2);
+#endif
+
       if (opBranch->_info != NULL)     do_info(opBranch->_info);
       assert(opBranch->_result->is_illegal(), "not used");
       if (opBranch->_stub != NULL)     opBranch->stub()->visit(this);
@@ -668,12 +687,21 @@ void LIR_OpVisitState::visit(LIR_Op* op) {
       assert(op->as_Op2() != NULL, "must be");
       LIR_Op2* op2 = (LIR_Op2*)op;
 
+#ifdef RISCV
+      assert(op2->_info == NULL && op2->_tmp3->is_illegal() &&
+             op2->_tmp4->is_illegal() && op2->_tmp5->is_illegal(), "not used");
+#else
       assert(op2->_info == NULL && op2->_tmp1->is_illegal() && op2->_tmp2->is_illegal() &&
              op2->_tmp3->is_illegal() && op2->_tmp4->is_illegal() && op2->_tmp5->is_illegal(), "not used");
+#endif
       assert(op2->_opr1->is_valid() && op2->_opr2->is_valid() && op2->_result->is_valid(), "used");
 
       do_input(op2->_opr1);
       do_input(op2->_opr2);
+#ifdef RISCV
+      if (op2->_tmp1->is_valid()) do_input(op2->_tmp1);
+      if (op2->_tmp2->is_valid()) do_input(op2->_tmp2);
+#endif
       do_temp(op2->_opr2);
       do_output(op2->_result);
 
@@ -1177,6 +1205,10 @@ LIR_List::LIR_List(Compilation* compilation, BlockBegin* block)
   , _file(NULL)
   , _line(0)
 #endif
+#ifdef RISCV
+  , _cmp_opr1(LIR_OprFact::illegalOpr)
+  , _cmp_opr2(LIR_OprFact::illegalOpr)
+#endif
 { }
 
 
@@ -1191,6 +1223,35 @@ void LIR_List::set_file_and_line(const char * file, int line) {
   }
   _file = f;
   _line = line;
+}
+#endif
+
+#ifdef RISCV
+void LIR_List::set_cmp_oprs(LIR_Op* op) {
+  switch (op->code()) {
+    case lir_cmp:
+      _cmp_opr1 = op->as_Op2()->in_opr1();
+      _cmp_opr2 = op->as_Op2()->in_opr2();
+      break;
+    case lir_branch:
+    case lir_cond_float_branch:
+      assert(op->as_OpBranch()->cond() == lir_cond_always ||
+             (_cmp_opr1 != LIR_OprFact::illegalOpr && _cmp_opr2 != LIR_OprFact::illegalOpr),
+             "conditional branches must have legal operands");
+      if (op->as_OpBranch()->cond() != lir_cond_always) {
+        op->as_OpBranch()->set_in_opr1(_cmp_opr1);
+        op->as_OpBranch()->set_in_opr2(_cmp_opr2);
+      }
+      break;
+    case lir_cmove:
+      assert(_cmp_opr1 != LIR_OprFact::illegalOpr && _cmp_opr2 != LIR_OprFact::illegalOpr,
+             "cmove must have legal comparison operands");
+      op->as_Op2()->set_tmp1_opr(_cmp_opr1);
+      op->as_Op2()->set_tmp2_opr(_cmp_opr2);
+      break;
+    default:
+      break;
+  }
 }
 #endif
 

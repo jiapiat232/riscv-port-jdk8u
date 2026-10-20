@@ -449,9 +449,9 @@ class StubGenerator: public StubCodeGenerator {
     __ beqz(a0, exit);
 
     // Check if oop is in valid heap memory range
-    __ movptr(a1, (intptr_t)Universe::verify_oop_mask());
+    __ li(a1, (intptr_t)Universe::verify_oop_mask());
     __ andr(a2, a0, a1);
-    __ movptr(a1, (intptr_t)Universe::verify_oop_bits());
+    __ li(a1, (intptr_t)Universe::verify_oop_bits());
     __ bne(a2, a1, error);
 
     // Load klass from mark / klass word

@@ -1618,6 +1618,176 @@ rnr <= pd_last_allocatable_cpu_reg
    - JDK 19 将 `G1PreBarrierStub` / `G1PostBarrierStub` 迁入了 `gc/g1/c1/g1BarrierSetC1.cpp`；
    - 而 JDK 8u 尚未引入 `BarrierSetC1`，`G1PreBarrierStub::emit_code` 与 `G1PostBarrierStub::emit_code` 必须在 [`c1_CodeStubs_riscv.cpp:259-341`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_CodeStubs_riscv.cpp#L259-L341) 中实现，对应的慢速队列刷新桩 `g1_pre_barrier_slow_id` 与 `g1_post_barrier_slow_id` 则在 [`c1_Runtime1_riscv.cpp:668-785`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_Runtime1_riscv.cpp#L668-L785) 中生成。
 
+---
+
+### 4.38 C++ 基类构造期虚表（`vptr`）尚未就绪导致 `NativeCall::get_trampoline()` 中 `code->is_nmethod()` 恒为 `false` 的自跳死循环陷阱
+
+#### 1. 问题现象
+在完成 Step 3.2（`c1_LIRGenerator_riscv.cpp` 与 `c1_LIRAssembler_riscv.cpp`）并开启 `-XX:+TieredCompilation -XX:TieredStopAtLevel=1` 后，C1 编译器成功将 `java.lang.String::hashCode` 编译为第一个 `nmethod`，但当解释器通过 I2C 适配器首次进入该编译方法并触发内部的方法调用时，JVM 线程瞬间陷入 **100% CPU 死循环**！
+通过 GDB 附加观察到：C1 编译生成的 `trampoline_call` 机器码竟然停留在 **`0x000000ef`（`jal ra, 0`，即原地自跳死循环）**，根本没有重定向到尾部的 `NativeCallTrampolineStub`，也没有修补为真实目标地址！
+
+#### 2. 根因深度剖析：C++ 对象构造顺序与 `CodeBlob` / `nmethod` 虚函数表切换时机
+1. 在 RISC-V 上，由于 `jal` 单指令跳转范围仅有 $\pm 1\text{MB}$，`MacroAssembler::trampoline_call` 先在调用点发射一条占位指令 `jal ra, pc+0`（偏移为 0），并在 Stub 区分配一个 `NativeCallTrampolineStub`（记录 `trampoline_stub_Relocation`）。
+2. 当 C1 完成代码发射、调用 `nmethod::new_nmethod` 安装方法时，构造链为：
+   ```cpp
+   nmethod::nmethod(...)
+     -> CodeBlob::CodeBlob(name, cb, ...)
+       -> cb->copy_code_to(this)
+         -> CodeBuffer::relocate_code_to(CodeBlob* dest)
+           -> CallRelocation::fix_relocation_after_move(src, dest)
+             -> pd_set_call_destination(addr)
+               -> NativeCall::set_destination_mt_safe(dest)
+                 -> NativeCall::get_trampoline()
+   ```
+3. 此前在 [`nativeInst_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.cpp#L244-L259) 的 `NativeCall::get_trampoline()` 中，写了如下防御判断：
+   ```cpp
+   CodeBlob *code = CodeCache::find_blob_unsafe(call_addr);
+   if (code == NULL || !code->is_nmethod()) {
+     return NULL;
+   }
+   ```
+4. **致命陷阱**：当 `cb->copy_code_to(this)` 被调用时，**当前执行点正处于基类构造函数 `CodeBlob::CodeBlob` 的函数体内部，派生类 `nmethod::nmethod` 的构造函数体尚未开始执行**！
+   根据 C++ 标准（ISO C++98 §12.7），在基类 `CodeBlob` 构造期间，对象 `this` 的动态类型就是 `CodeBlob`，其虚函数表指针（`vptr`）指向的是 `CodeBlob` 的虚表，此时调用虚函数 `code->is_nmethod()` **永远返回 `false`**！
+5. 结果导致：在 `copy_code_to` 重定位阶段，当 `dest` 距离调用点超过 $\pm 1\text{MB}$（例如调用 `SharedRuntime::get_ic_miss_stub()` 或远距离方法）时，`set_destination_mt_safe` 试图通过 `get_trampoline()` 查找蹦床桩，却因 `!code->is_nmethod()` 提前返回了 `NULL`！结果既没有把 `dest` 写入蹦床桩，也没有把 `jal` 指向蹦床桩，调用点保留了初始发射时的 `jal ra, 0` 自跳指令！
+
+#### 3. 完美解决方案
+对照本仓 JDK 8u AArch64 的 [`nativeInst_aarch64.cpp:126-135`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.cpp#L126-L135) 与 JDK 19 RISC-V 的 `nativeInst_riscv.cpp`，在 [`nativeInst_riscv.cpp:244-258`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.cpp#L244-L258) 中直接使用 `CodeCache::find_blob_unsafe(call_addr)` 并调用 `trampoline_stub_Relocation::get_trampoline_for(call_addr, (nmethod*)code)`（因为 `get_trampoline_for` 仅访问基类 `CodeBlob` 已初始化完毕的 `relocation_begin()` / `relocation_end()` 非虚成员），绝不在 `CodeBlob` 构造期依赖虚函数 `is_nmethod()`！
+
+---
+
+### 4.39 `NativeFenceI` 指令序列长度失配与 JDK 8u vs JDK 19 C1 `build_frame` 栈帧大小契约鸿沟
+
+#### 1. 鸿沟一：`Assembler::ifence()` 在 `UseConservativeFence` 下的 8 字节发射 vs `NativeFenceI::instruction_size` 4 字节硬编码
+1. **问题现象**：
+   当 C1 编译代码首次执行静态方法调用（`invokestatic`）并进入 `SharedRuntime::resolve_static_call_C` 修补调用点时，触发断言失败：
+   ```
+   Internal Error (nativeInst_riscv.cpp:154), Error: not a movptr
+   ```
+   调用栈显示 `CompiledStaticCall::verify()` 在检查静态调用桩（`emit_static_call_stub`）时，认为首条指令不是 `movptr`（或 `is_fencei_at` 偏移失配）！
+2. **根因剖析**：
+   - 在 [`assembler_riscv.hpp:2331-2339`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/assembler_riscv.hpp#L2331-L2339) 中，`Assembler::ifence()` 的实现为：
+     ```cpp
+     void ifence() {
+       if (UseConservativeFence) {
+         fence(ir, ir);
+       }
+       fence_i();
+     }
+     ```
+     由于默认 `UseConservativeFence = true`，`__ ifence()` 实际发射了 **2 条 32 位指令（`fence ir, ir` + `fence.i`，共 8 字节）**！
+   - 然而，在 [`nativeInst_riscv.hpp:425-431`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.hpp#L425-L431) 中，`NativeFenceI::instruction_size` 此前被硬编码为枚举常量 `4`（单条指令）！
+   - 当 [`compiledIC_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/compiledIC_riscv.cpp#L91-L166) 中的 `CompiledStaticCall::set_to_interpreted` 跨过開头的 `NativeFenceI` 去定位紧随其后的 `mov_metadata`（`movptr`）和 `NativeJump` 时，使用了 `stub + NativeFenceI::instruction_size`（仅跳过 4 字节），结果落在了第二条指令 `fence.i` 上，导致 `nativeMovConstReg_at` 立即报 `not a movptr`！
+3. **此外，`NativeJump::jump_destination()` 的未绑定占位值 `-1` 解码**：
+   - `emit_static_call_stub` 在生成静态调用桩尾部发射的是跳向自身的占位跳转 `jr(t0)`（目标地址初始化为 `0`）。而 HotSpot 共享层 `CompiledStaticCall::verify()` 要求未绑定的 `NativeJump::jump_destination()` 返回 **`(address)-1`**。因此 [`NativeJump::jump_destination()`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.cpp#L375-L386) 在读取到目标地址为 `0` 时必须将其归一化返回为 `(address)-1`。
+4. **完美解决方案**：
+   在 [`nativeInst_riscv.hpp:425-431`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.hpp#L425-L431) 中将 `NativeFenceI::instruction_size()` 定义为动态计算函数 `(1 + (UseConservativeFence ? 1 : 0)) * NativeInstruction::instruction_size`，并同步更新 `is_fencei_at(address)` 与 `compiledIC_riscv.cpp`。
+
+#### 2. 鸿沟二：JDK 8u vs JDK 19 在 `C1_MacroAssembler::build_frame` / `remove_frame` 上的 `2 * wordSize`（16 字节）契约差
+1. **问题现象**：
+   开启 C1 编译后，一旦触发栈回溯（如异常抛出或 GC 扫描 C1 编译栈帧），`frame::sender_for_compiled_frame` 计算出的调用者 `sender_sp` 与真实 `sp` 相差整整 **16 字节（2 个机器字）**！
+2. **根因剖析**：
+   - 在 **JDK 19** 中，`FrameMap::framesize()` 在共享层已经把保存 `fp` 和 `ra` 的 2 个机器字（`2 * wordSize = 16` 字节）算进了 `frame_size_in_bytes` 中，因此 JDK 19 的 `C1_MacroAssembler::build_frame(int frame_size_in_bytes, ...)` 直接调用 `MacroAssembler::build_frame(frame_size_in_bytes)`。
+   - 但在 **JDK 8u** 中（对照 [`c1_LIRAssembler_aarch64.cpp:176-184`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/c1_LIRAssembler_aarch64.cpp#L176-L184) 与 [`c1_MacroAssembler_aarch64.cpp:365-377`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/aarch64/vm/c1_MacroAssembler_aarch64.cpp#L365-L377)），`LIR_Assembler::initial_frame_size_in_bytes()` **显式减去了 `2 * wordSize`**（即 `in_bytes(frame_map()->framesize_in_bytes()) - 2 * wordSize`），因为 JDK 8u 的契约规定：`initial_frame_size_in_bytes()` 返回的是**不含 `fp/ra` 的净帧大小**，由 `C1_MacroAssembler::build_frame` 和 `remove_frame` 自己加上 `2 * wordSize`！
+3. **完美解决方案**：
+   在 [`c1_MacroAssembler_riscv.cpp:317-332`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_MacroAssembler_riscv.cpp#L317-L332) 的 `C1_MacroAssembler::build_frame` 与 `remove_frame` 中，调用底层 `MacroAssembler::build_frame(frame_size_in_bytes + 2 * wordSize)` 与 `MacroAssembler::remove_frame(frame_size_in_bytes + 2 * wordSize)`，使物理分配的栈帧大小与 `CodeBlob::frame_size()`（`initial_frame_size_in_bytes() + 2 * wordSize`）100% 吻合！
+
+---
+
+### 4.40 `DeoptimizationBlob` 临时 `CodeBuffer` 地址被 `I2C/C2I adapters` 复用引发的逆优化栈帧误判，以及 `SignatureHandlerGenerator` 栈上代码生成的寻址陷阱
+
+#### 1. 问题现象
+在 `-Xcomp -XX:+TieredCompilation -XX:TieredStopAtLevel=1` 压力模式下，当 C1 编译的 `ComprehensiveTest::<clinit>` 因类尚未初始化触发 `patch_code_riscv` 并进入 `SharedRuntime::generate_deopt_blob` 执行逆优化解包（`Deoptimization::unpack_frames`）时，JVM 触发致命断言崩溃：
+```
+Internal Error (frame_riscv.cpp:544), pid=38, tid=1075827728
+assert(is_interpreted_frame()) failed: interpreted frame expected
+```
+通过 GDB 打印 `Deoptimization::unpack_frames` 中的栈回溯发现：
+- `stub_frame`（即 `thread->last_frame()`，本应是 `DeoptimizationBlob` 自身的栈帧）的 `_cb` 竟然被识别成了 **`BufferBlob: I2C/C2I adapters`**！
+- 更诡异的是，`stub_frame.pc()` 的值 `0x400b4bb3cc` 落在了 `I2C/C2I adapters` 内部，而真正在执行的 `DeoptimizationBlob` 代码明明位于 `0x400b4fb0a0`！导致 `stub_frame.sender()` 调用了 `sender_for_interpreter_frame` 而不是 `sender_for_compiled_frame`，直接崩溃！
+
+#### 2. 根因深度剖析：临时 `BufferBlob` 的生命周期、`CodeCache` 空闲块复用与绝对寻址 `movptr` vs PC 相对寻址 `la`
+1. 在 [`sharedRuntime_riscv.cpp:2598-2601`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp#L2598-L2601) 的 `SharedRuntime::generate_deopt_blob()` 中：
+   ```cpp
+   CodeBuffer buffer("deopt_blob", 2048, 1024);
+   ...
+   address the_pc = __ pc();
+   __ set_last_Java_frame(sp, fp, the_pc, t0);
+   ```
+2. 请注意 `CodeBuffer buffer("deopt_blob", 2048, 1024)` 的工作机制：
+   - 它首先在 `CodeCache` 中分配一个临时的 `BufferBlob`（假设起始地址为 `0x400b4bb000`），所有指令先发射到这个临时缓冲区中，此时 `the_pc` 的值是临时缓冲区内的地址 `0x400b4bb3cc`！
+   - 当 `generate_deopt_blob` 末尾调用 `DeoptimizationBlob::create(&buffer, ...)` 时，HotSpot 会在 `CodeCache` 中分配一个新的正式 `DeoptimizationBlob`（地址为 `0x400b4fb0a0`），调用 `buffer.copy_code_to(blob)` 将机器码复制过去，**然后立即调用 `BufferBlob::free` 将刚才那个临时缓冲区（`0x400b4bb000`）释放回 `CodeCache` 空闲链表**！
+   - 紧接着，JVM 初始化继续向下走，`AdapterHandlerLibrary` 请求分配 `BufferBlob: I2C/C2I adapters`，`CodeCache` **把刚刚释放的 `0x400b4bb000` 这块内存原封不动地分配给了 `I2C/C2I adapters`**！
+3. 那么为什么 `DeoptimizationBlob` 在 `0x400b4fb3cc` 执行 `__ set_last_Java_frame(sp, fp, the_pc, t0)` 时，会把旧的临时地址 `0x400b4bb3cc` 写进 `JavaThread::_anchor._last_Java_pc` 呢？
+   - 因为此前在 [`macroAssembler_riscv.cpp:702-710`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L702-L710) 中，`set_last_Java_frame` 调用了 `movptr(temp, last_java_pc)`（或者调用了内部退化为 `movptr` 的 `la(Register, const address)`）！
+   - `movptr` 发射的是 **6 条加载 48 位绝对常量的指令（`lui + addi + slli...`）**，并且**没有重定位项（Relocation）**！因此当 `buffer.copy_code_to(blob)` 将代码从 `0x400b4bb000` 拷贝到 `0x400b4fb0a0` 时，`movptr` 中的立即数纹丝不动，依然硬编码着临时缓冲区的旧地址 `0x400b4bb3cc`！
+4. **硬币的另一面（对偶陷阱）：`SignatureHandlerGenerator` 在 C 栈上生成代码后直接 `memcpy` 到 `CodeCache`**：
+   - 当我们将 `MacroAssembler::la(Register Rd, const address dest)` 修复为：当 `dest` 与当前 `pc()` 的距离在 $\pm 2\text{GB}$ 以内时，发射 PC 相对的 **`auipc + addi`** 指令对（因此当 `DeoptimizationBlob` 整体从临时 `CodeBuffer` 平移拷贝到正式 `DeoptimizationBlob` 时，`the_pc` 与当前指令的相对偏移保持不变，自动指向新位置！）后，必须警惕一个**方向相反的特例**：
+   - 在 [`interpreterRT_riscv.cpp:146`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interpreterRT_riscv.cpp#L146) 的 `SignatureHandlerGenerator::generate` 中：
+     ```cpp
+     void InterpreterRuntime::SignatureHandlerGenerator::generate(uint64_t fingerprint) {
+       ...
+       __ la(x10, Interpreter::result_handler(method()->result_type()));
+     }
+     ```
+   - 为什么这里用 PC 相对的 `la(Register, const address)` 会崩溃？因为 [`AdapterHandlerLibrary::create_native_wrapper`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/runtime/sharedRuntime.cpp#L2431-L2440) 在调用 `SignatureHandlerGenerator` 时，传入的 `CodeBuffer` **根本不在 `CodeCache` 里，而是 C++ 线程栈上的一个局部数组 `unsigned char buffer[1024]`（地址如 `0x4002c70eb0`）**！生成完后，它甚至不调 `copy_code_to`，而是直接用裸 `memcpy(handler, buffer, ...)` 把机器码拷进 `CodeCache`（地址如 `0x400b53f000`）！
+   - 在 C 栈地址 `0x4002c70eb0` 与 `CodeCache` 地址 `0x400b53f000` 之间，差值约 `136MB`（小于 2GB），如果 `SignatureHandlerGenerator` 发射了无重定位的 `auipc + addi`，经裸 `memcpy` 搬移 136MB 后，PC 相对偏移就会指飞 136MB！
+
+#### 3. 完美解决方案
+1. 在 [`macroAssembler_riscv.cpp:702-710, 1480-1495`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L702-L710) 中：
+   - `set_last_Java_frame` 使用 `la(temp, last_java_pc)`；
+   - `MacroAssembler::la(Register Rd, const address dest)` 在 32 位有符号偏移范围内使用 `auipc + addi`（满足同一 `CodeBlob` 内部如 `the_pc` 的位置无关自引用）；
+2. 在 [`interpreterRT_riscv.cpp:146`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interpreterRT_riscv.cpp#L146) 中，将外部地址显式包装为 `ExternalAddress`：
+   ```cpp
+   __ la(x10, ExternalAddress(Interpreter::result_handler(method()->result_type())));
+   ```
+   因为 `la(Register, const Address&)` 针对 `external_word_type` 发射的是定长绝对地址加载 `movptr`（不依赖生成时的 `pc()`），即便在 C 栈上生成再裸 `memcpy` 到 `CodeCache` 也 100% 准确！
+
+---
+
+### 4.41 AArch64（48 位无符号 `movz/movk`）与 RISC-V（47 位无符号 / `-1` 有符号 `lui/addi`）在 `Universe::non_oop_word()` 上的第 48 位借位翻转鸿沟
+
+#### 1. 问题现象
+在 `-Xcomp -XX:+TieredCompilation -XX:TieredStopAtLevel=1` 下跑通全部 5 次逆优化后，程序推进到 `ComprehensiveTest` 的 `[Test 6] System.gc()`。在 GC Safepoint 扫描 `CodeCache` 中已编译方法的内联缓存（`CompiledIC`）时，触发致命断言失败：
+```
+Internal Error (compiledIC.cpp:144), pid=38, tid=1093567792
+assert(!is_clean || is_optimized() || cached_value() == NULL) failed: Sanity check
+```
+通过 GDB 检查该 `CompiledIC`：
+- 该调用点是一个尚未解析的虚调用（Clean IC，目标指向 `SharedRuntime::get_ic_miss_stub()`）；
+- 其关联的 `NativeMovConstReg`（由 `MacroAssembler::ic_call` 生成，初值为 `Universe::non_oop_word()`）读出的 `data()` 竟然是 **`0xffffefffffffffff`**，而 `Universe::non_oop_word()` 的值却是 **`0x0000ffffffffffff`**！
+- 因为 `0xffffefffffffffff != 0x0000ffffffffffff`，`CompiledIC::cached_value()` 误以为该 Clean IC 缓存了一个非空的 `Metadata*`，直接触发断言爆炸！
+
+#### 2. 根因深度剖析：为什么 `0x0000ffffffffffff` 经过 RISC-V `movptr` 后会变成 `0xffffefffffffffff`？
+这是一处极其隐蔽且深刻的 **AArch64 vs RISC-V 64 位立即数编码架构鸿沟**：
+1. **`Universe::non_oop_word()` 的来源**：
+   - 在 [`universe.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/memory/universe.cpp) 中，`Universe::non_oop_word()` 返回 `(oop)os::non_memory_address_word()`。
+   - 在 AArch64（[`os_linux_aarch64.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/os_cpu/linux_aarch64/vm/os_linux_aarch64.cpp)）中，`os::non_memory_address_word()` 返回 `(char*)0xffffffffffff`（**48 位全 1，高 16 位为 0**）。
+   - 为什么 AArch64 选 `0x0000ffffffffffff`？因为 AArch64 的 `movptr` 由无符号的 `movz xN, #imm16; movk xN, #imm16, lsl #16; movk xN, #imm16, lsl #32`（3 条 16 位无符号拼接指令）组成，它能精确表示任意 **48 位无符号整数 `[0, 0x0000ffffffffffff]`**，且高 16 位恒清零！
+2. **RISC-V `movptr` 的有符号扩展本质**：
+   - 相反，RISC-V 没有无符号的 `movz/movk` 指令！RISC-V 的 6 指令 `movptr` 序列是：
+     ```riscv
+     lui   Rd, imm[47:29]       # 1. 加载高 20 位到 Rd[31:12]，并将 Rd[31]（即原地址的 bit 48）符号扩展到 Rd[63:32]！
+     addi  Rd, Rd, imm[28:17]   # 2. 加上有符号 12 位立即数
+     slli  Rd, Rd, 11           # 3. 左移 11 位
+     addi  Rd, Rd, imm[16:6]    # 4. 加上 11 位立即数
+     slli  Rd, Rd, 6            # 5. 左移 6 位（累计左移 17 位）
+     addi  Rd, Rd, imm[5:0]     # 6. 加上低 6 位立即数
+     ```
+   - 请仔细推演当输入 `imm = 0x0000ffffffffffff`（低 48 位全 1，bit 47 为 1）时会发生什么：
+     - 在 `movptr_with_offset` 中，首先截断取低 48 位：`imm64 = 0x0000ffffffffffff`；
+     - `imm[28:17]` 全为 1（即 `-1`，负数）。为了补偿 `addi Rd, Rd, -1` 产生的向高位的借位，算法会令 `upper += (lower >> 11)`（当 `lower < 0` 时其实应当 `+1` 补偿借位，但即便看 `lui` 的符号位）：
+     - 在 `0x0000ffffffffffff` 中，第 47 位是 1，左移 16 位再算术右移 33 位后，`lui` 的最高位 `Rd[31]` 为 1，**在 RV64 中 `lui` 会把 `Rd[31]` 符号扩展到 `Rd[63:32]` 全 1**；而 `addi` 的 `-1` 导致第 31 位向第 32 位借位变成 `0`！再经过 `slli 11` 和 `slli 6`（共左移 17 位），原本的第 31 位变成了最终的 **第 48 位（bit 48 = 0）**，而更高的位 `[63:49]` 全是符号扩展出的 `1`！
+     - 结果：无论是在 CPU 寄存器里执行这 6 条指令，还是由 `NativeMovConstReg::data()`（`MacroAssembler::get_target_of_movptr`）反解这 6 条指令，得到的结果都是 **`0xffffefffffffffff`**！
+   - 换言之，RISC-V 的 6 指令 `movptr` 只能无损编码 **47 位无符号用户态地址 `[0, 0x00007fffffffffff]`**（bit 47 为 0）或者 **64 位全 1 的 `-1`（`0xffffffffffffffff`）**！
+
+#### 3. 完美解决方案
+严格对齐 JDK 19 RISC-V 上游设计（`/Users/wujiahua/code/jdk19/src/hotspot/os_cpu/linux_riscv/os_linux_riscv.cpp:86` 与 `macroAssembler_riscv.cpp:1182-1266`）：
+1. 在 [`os_linux_riscv.cpp:104-112`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.cpp#L104-L112) 中，将 `os::non_memory_address_word()` 改为返回 **`(char*)-1`（即 `0xffffffffffffffff`）**；
+2. 在 [`macroAssembler_riscv.cpp:57-125, 936-995`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp#L57-L125) 的 `movptr_with_offset`、`patch_addr_in_movptr` 与 `get_target_of_movptr` 中：
+   - 修正 `upper` 对 `lower` 负数借位的补偿为标准的 `if (lower < 0) { upper += (1 << 12); }`：当传入 `(address)-1` 时，`lower = -1` 触发 `upper += 0x1000` 使 `upper = 0`，发射 `lui Rd, 0` + `addi Rd, Rd, -1`（此时 `Rd = -1`），随后连续两次 `slli + addi` 保持全 1，执行结果与 `get_target_of_movptr` 解码结果均为精确的 **`(address)-1`（`0xffffffffffffffff`）**！
+3. 将非地址类的 64 位算术位掩码（如 [`interp_masm_riscv.cpp:401, 645`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/interp_masm_riscv.cpp#L401) 和 [`sharedRuntime_riscv.cpp:1509`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/sharedRuntime_riscv.cpp#L1509) 中的页对齐掩码 `7 - os::vm_page_size()`、[`stubGenerator_riscv.cpp:452-454`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/stubGenerator_riscv.cpp#L452-L454) 中的 `Universe::verify_oop_mask()`）统一改用通用 64 位立即数加载 `li` 而非地址专用的 `movptr`。
+
+---
 
 如果未来要在 OpenJDK 8u 中移植另一个全新的指令集架构（如某个专有 ASIC、DSP 或新一代开放架构），可直接按照本工程总结的核对清单推进 Phase 1：
 

@@ -28,9 +28,9 @@ flowchart TD
     P1["【Phase 1】底层汇编器、寄存器与 OS/CPU 粘合<br/>(状态: 100% 已完成, 66/66 GNU as 差分单测通过)"]
     P2_1["【Phase 2.1~2.5】模板解释器与基础运行时 Stubs<br/>(Milestone 1 已达成: -Xint -version / HelloWorld)"]
     P2_6["【Phase 2.6】底层运行时基座加固: 四大GC屏障/Safepoint/OopMap/偏向锁<br/>(Milestone 1.5 已达成: -Xint 四大GC跑通 javac 自举编译)"]
-    P3_0["【Phase 3.0】代码修补、重定位与内联缓存/蹦床层<br/>(nativeInst / relocInfo / CompiledIC / 定长 movptr)"]
-    P3_1["【Phase 3.1】C1 基础组件与 Runtime1 桩<br/>(FrameMap / C1_MacroAssembler / CodeStubs / Runtime1)"]
-    P3_2["【Phase 3.2】C1 LIR 生成器与汇编器及四大GC屏障<br/>(Milestone 2: -XX:TieredStopAtLevel=1 稳定跑通)"]
+    P3_0["【Phase 3.0】代码修补、重定位与内联缓存/蹦床层<br/>(状态: 100% 已完成)"]
+    P3_1["【Phase 3.1】C1 基础组件与 Runtime1 桩<br/>(状态: 100% 已完成)"]
+    P3_2["【Phase 3.2】C1 LIR 生成器与汇编器及四大GC屏障<br/>(Milestone 2 已达成: -XX:TieredStopAtLevel=1 & -Xcomp 四大GC全通)"]
     P4["【Phase 4】C1 & Runtime 并发 GC 与反优化高压验证<br/>(Milestone 3: 通过 G1/CMS 并发标记与偏向锁撤销压测)"]
     P5["【Phase 5】C2 服务端编译器与 riscv64.ad 架构定义<br/>(Milestone 4: 全功能分层编译 TieredCompilation)"]
     P6["【Phase 6】现代硬件特性: RVC加固、Zba/Zbb、RVV 1.0<br/>(Final Milestone: 达到生产级发布标准)"]
@@ -92,7 +92,7 @@ flowchart TD
 
 ---
 
-### 【Phase 3：代码修补重定位层与 C1 客户端编译器】（当前推进阶段）
+### 【Phase 3：代码修补重定位层与 C1 客户端编译器】（已完成 100%，Milestone 2 达成）
 
 为了确保工程可控、步步为营，Phase 3 拆分为 3 个严格递进的子阶段：
 
@@ -120,15 +120,21 @@ flowchart TD
   * **RISC-V `StubFrame` 顶部 `fp` vs AArch64 底部 `rfp` 偏移差**：精确对齐 `StubFrame::load_argument`（`[fp + offset*8]`）与异常/修补返回地址槽位（`[fp - 8]`），并闭合 `save_live_registers` 中 27 个整数寄存器的奇数对齐填充字与 `OopMap` / `restore_live_registers_except_r10` 的三方契约；
   * **JDK 8u vs JDK 19 `CodeStubs` 契约适配**：适配双参数 `RangeCheckStub`、无参 `DeoptimizeStub`、多态 `CounterOverflowStub::_method` 以及 JEP 304 之前的内联 `G1Pre/PostBarrierStub`。
 
-#### 【Step 3.2：C1 LIR 生成器与 LIR 汇编器（Milestone 2）】
-* **核心目标**：打通 HIR $\rightarrow$ LIR $\rightarrow$ RISC-V 机器码完整编译流水线。
-* **具体任务**：
-  1. `c1_LIRGenerator_riscv.cpp`：将平台无关 HIR 节点平铺为 RISC-V LIR 指令序列（含内置函数 Intrinsics、CAS、比较分支、算术运算与 GC 写屏障调用）；
-  2. `c1_LIRAssembler_riscv.cpp`：将 LIR 指令发射为 RISC-V 机器码（含方法序言/尾声、OSR 栈帧迁移、异常/反优化 Handler、Safepoint 轮询点、常量池加载与 `trampoline_call`）；
-  3. 从 [`compiler_stubs_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/compiler_stubs_riscv.cpp) 移除全部 C1 占位桩。
-* **验收标准（Milestone 2）**：
-  * 开启 `-XX:TieredStopAtLevel=1`（及 `-Xcomp -XX:TieredStopAtLevel=1`）成功运行 `-version`、`Hello` 与 [`ComprehensiveTest`](file:///Users/wujiahua/code/riscv-port-jdk8u/ComprehensiveTest.java)；
-  * 在四大 GC（Serial / Parallel / CMS / G1）下均能稳定通过 C1 JIT 编译执行与 `javac` 编译测试。
+#### 【Step 3.2：C1 LIR 生成器与 LIR 汇编器（Milestone 2 已达成）】
+* **核心目标**：打通 HIR $\rightarrow$ LIR $\rightarrow$ RISC-V 机器码完整编译流水线与逆优化（Deoptimization）闭环。
+* **已交付物**：
+  1. [`c1_LIRGenerator_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_LIRGenerator_riscv.cpp)：将平台无关 HIR 节点平铺为 RISC-V LIR 指令序列（含内置函数 Intrinsics、CAS、比较分支、算术运算与四大 GC 写屏障调用）；
+  2. [`c1_LIRAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_LIRAssembler_riscv.cpp) & [`c1_LinearScan_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_LinearScan_riscv.hpp)：将 LIR 指令发射为 RISC-V 机器码（含方法序言/尾声、OSR 栈帧迁移、异常/反优化 Handler、Safepoint 轮询点、常量池加载与 `trampoline_call`）；
+  3. [`methodHandles_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/methodHandles_riscv.hpp) / [`methodHandles_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/methodHandles_riscv.cpp)：实现 JSR 292 `MethodHandles` 适配器生成与 `jump_to_lambda_form`；
+  4. 从 [`compiler_stubs_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/compiler_stubs_riscv.cpp) 移除全部 C1 占位桩，仅保留 C2 Matcher 桩。
+* **跨越的核心架构鸿沟**：
+  * **C++ 基类 `CodeBlob` 构造期虚表（`vptr`）陷阱**：修复 [`nativeInst_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.cpp) `NativeCall::get_trampoline()` 在 `CodeBlob` 构造期调用 `code->is_nmethod()` 恒返回 `false` 导致远跳保留 `jal ra, 0` 自跳死循环的陷阱；
+  * **`NativeFenceI` 动态长度与 JDK 8u C1 `build_frame` 帧大小契约**：对齐 `UseConservativeFence` 下的 8 字节 `ifence()` 长度，并在 `C1_MacroAssembler::build_frame` / `remove_frame` 中补齐 JDK 8u `initial_frame_size_in_bytes()` 扣除的 `2 * wordSize`（16 字节 `fp/ra`）；
+  * **`DeoptimizationBlob` 临时 `CodeBuffer` 被 `I2C/C2I adapters` 复用引发的逆优化栈帧误判**：将 `set_last_Java_frame` 与 `MacroAssembler::la(Register, const address)` 修复为 PC 相对的 `auipc + addi`，并将 C 栈上生成代码后裸 `memcpy` 的 `SignatureHandlerGenerator` 显式包装为 `ExternalAddress`；
+  * **AArch64（48 位无符号 `movz/movk`）vs RISC-V（47 位无符号 / `-1` 有符号 `lui/addi`）在 `Universe::non_oop_word()` 上的编码鸿沟**：将 `os::non_memory_address_word()` 对齐为 `(char*)-1`，修复 GC Safepoint 扫描 Clean `CompiledIC` 时第 48 位借位翻转（`0xffffefffffffffff`）引发的断言崩溃。
+* **验收结果（Milestone 2 达成）**：
+  * 开启 `-XX:+TieredCompilation -XX:TieredStopAtLevel=1` 及 `-Xcomp -XX:TieredStopAtLevel=1` 成功运行 `-version`、`Hello` 与 [`ComprehensiveTest`](file:///Users/wujiahua/code/riscv-port-jdk8u/ComprehensiveTest.java)（包含 5 次 C1 逆优化打包/解包与 `System.gc()` Safepoint 扫描）；
+  * 在四大 GC（Serial / Parallel / CMS / G1）下均 100% 通过 C1 Tier 1 与 `-Xcomp` 验证！
 
 ---
 

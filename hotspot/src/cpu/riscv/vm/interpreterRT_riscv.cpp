@@ -143,7 +143,7 @@ void InterpreterRuntime::SignatureHandlerGenerator::generate(uint64_t fingerprin
   iterate(fingerprint);
 
   // return result handler in x10
-  __ la(x10, Interpreter::result_handler(method()->result_type()));
+  __ la(x10, ExternalAddress(Interpreter::result_handler(method()->result_type())));
   __ ret();
 
   __ flush();

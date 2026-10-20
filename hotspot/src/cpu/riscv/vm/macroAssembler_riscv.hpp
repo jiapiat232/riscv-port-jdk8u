@@ -97,23 +97,23 @@ class MacroAssembler: public Assembler {
   using Assembler::flw;
   using Assembler::fsw;
 
-  void ld(Register dst, Address adr);
+  void ld(Register dst, Address adr, Register tmp = t0);
   void ld(Register dst, Label& L);
-  void sd(Register src, Address adr);
-  void lw(Register dst, Address adr);
-  void sw(Register src, Address adr);
-  void lh(Register dst, Address adr);
-  void sh(Register src, Address adr);
-  void lb(Register dst, Address adr);
-  void sb(Register src, Address adr);
-  void lbu(Register rd, Address adr);
-  void lhu(Register rd, Address adr);
-  void lwu(Register rd, Address adr);
+  void sd(Register src, Address adr, Register tmp = t0);
+  void lw(Register dst, Address adr, Register tmp = t0);
+  void sw(Register src, Address adr, Register tmp = t0);
+  void lh(Register dst, Address adr, Register tmp = t0);
+  void sh(Register src, Address adr, Register tmp = t0);
+  void lb(Register dst, Address adr, Register tmp = t0);
+  void sb(Register src, Address adr, Register tmp = t0);
+  void lbu(Register rd, Address adr, Register tmp = t0);
+  void lhu(Register rd, Address adr, Register tmp = t0);
+  void lwu(Register rd, Address adr, Register tmp = t0);
 
-  void fld(FloatRegister dst, Address adr);
-  void fsd(FloatRegister src, Address adr);
-  void flw(FloatRegister dst, Address adr);
-  void fsw(FloatRegister src, Address adr);
+  void fld(FloatRegister dst, Address adr, Register tmp = t0);
+  void fsd(FloatRegister src, Address adr, Register tmp = t0);
+  void flw(FloatRegister dst, Address adr, Register tmp = t0);
+  void fsw(FloatRegister src, Address adr, Register tmp = t0);
 
   // -------------------------------------------------------------
   // Stack and Frame Management
@@ -245,8 +245,12 @@ class MacroAssembler: public Assembler {
   // -------------------------------------------------------------
   void safepoint_poll(Register tmp);
   void get_polling_page(Register dest, address page, relocInfo::relocType rtype);
+  void get_polling_page(Register dest, relocInfo::relocType rtype) {
+    get_polling_page(dest, os::get_polling_page(), rtype);
+  }
   address read_polling_page(Register r, address page, relocInfo::relocType rtype);
   address read_polling_page(Register r, relocInfo::relocType rtype);
+  address read_polling_page(Register r, int32_t offset, relocInfo::relocType rtype);
   void reinit_heapbase();
   void load_byte_map_base(Register dst);
   void get_thread(Register dst) {
@@ -385,6 +389,7 @@ class MacroAssembler: public Assembler {
   void add_memory_int32(const Address dst, int32_t imm);
 
   // Method lookup
+  Address argument_address(RegisterOrConstant arg_slot, int extra_slot_offset = 0);
   void lookup_virtual_method(Register recv_klass,
                              RegisterOrConstant vtable_index,
                              Register method_result);
@@ -488,14 +493,55 @@ class MacroAssembler: public Assembler {
   void fcvt_w_d_safe(Register dst, FloatRegister src, Register tmp = t0);
   void fcvt_l_d_safe(Register dst, FloatRegister src, Register tmp = t0);
 
+  inline void mvw(Register Rd, int32_t imm32) { mv(Rd, (int64_t)imm32); }
+
+  using Assembler::add;
+  using Assembler::addw;
+  using Assembler::sub;
   using Assembler::subw;
+  void add(Register Rd, Register Rn, int64_t increment, Register tmp = t0);
+  void addw(Register Rd, Register Rn, int64_t increment, Register tmp = t0);
+  void sub(Register Rd, Register Rn, int64_t decrement, Register tmp = t0);
   void subw(Register Rd, Register Rn, int64_t decrement, Register tmp = t0);
+  void andi(Register Rd, Register Rn, int64_t imm, Register tmp = t0);
+  void orptr(Address adr, RegisterOrConstant src, Register tmp1 = t0, Register tmp2 = t1);
+
+  int corrected_idivl(Register result, Register rs1, Register rs2, bool want_remainder);
+  int corrected_idivq(Register result, Register rs1, Register rs2, bool want_remainder);
+
+  void load_reserved(Register addr, enum operand_size size, Assembler::Aqrl acquire);
+  void store_conditional(Register addr, Register new_val, enum operand_size size, Assembler::Aqrl release);
+  void cmpxchg(Register addr, Register expected,
+               Register new_val,
+               enum operand_size size,
+               Assembler::Aqrl acquire, Assembler::Aqrl release,
+               Register result, bool result_as_bool = false);
+
+  void atomic_add(Register prev, RegisterOrConstant incr, Register addr);
+  void atomic_addw(Register prev, RegisterOrConstant incr, Register addr);
+  void atomic_addal(Register prev, RegisterOrConstant incr, Register addr);
+  void atomic_addalw(Register prev, RegisterOrConstant incr, Register addr);
+
+  void atomic_xchg(Register prev, Register newv, Register addr);
+  void atomic_xchgw(Register prev, Register newv, Register addr);
+  void atomic_xchgal(Register prev, Register newv, Register addr);
+  void atomic_xchgalw(Register prev, Register newv, Register addr);
+  void atomic_xchgwu(Register prev, Register newv, Register addr);
+  void atomic_xchgalwu(Register prev, Register newv, Register addr);
+
+  virtual void _call_Unimplemented(address call_site) {
+    mv(t1, call_site);
+    stop("Unimplemented");
+  }
+  #define call_Unimplemented() _call_Unimplemented((address)__PRETTY_FUNCTION__)
 
   // -------------------------------------------------------------
   // Verification and Debugging
   // -------------------------------------------------------------
   void _verify_method_ptr(Register reg, const char * msg, const char * file, int line) {}
+  void _verify_klass_ptr(Register reg, const char * msg, const char * file, int line) {}
 #define verify_method_ptr(reg) _verify_method_ptr(reg, "broken method " #reg, __FILE__, __LINE__)
+#define verify_klass_ptr(reg) _verify_klass_ptr(reg, "broken klass " #reg, __FILE__, __LINE__)
 
   void verify_oop(Register reg, const char* s = "bad oop") PRODUCT_RETURN;
   void verify_oop_addr(Address addr, const char* s = "bad oop") PRODUCT_RETURN;

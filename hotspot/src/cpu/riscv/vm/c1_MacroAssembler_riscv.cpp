@@ -319,11 +319,16 @@ void C1_MacroAssembler::build_frame(int framesize, int bang_size_in_bytes) {
   // Make sure there is enough stack space for this method's activation.
   // Note that we do this before creating a frame.
   generate_stack_overflow_check(bang_size_in_bytes);
-  MacroAssembler::build_frame(framesize);
+  // Note: In JDK 8u C1, LIR_Assembler::initial_frame_size_in_bytes() subtracts
+  // 2 * wordSize (the return address and link slots) from frame_map()->framesize().
+  // Because our MacroAssembler::build_frame(size) expects the TOTAL frame size
+  // (including the 2 words for saved fp and ra at [sp + size - 16] and [sp + size - 8]),
+  // we must add 2 * wordSize back here, matching AArch64!
+  MacroAssembler::build_frame(framesize + 2 * wordSize);
 }
 
 void C1_MacroAssembler::remove_frame(int framesize) {
-  MacroAssembler::remove_frame(framesize);
+  MacroAssembler::remove_frame(framesize + 2 * wordSize);
 }
 
 void C1_MacroAssembler::verified_entry() {

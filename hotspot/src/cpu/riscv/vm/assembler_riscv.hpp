@@ -218,6 +218,9 @@ class Assembler : public AbstractAssembler {
     OP_FP     = 0x53
   };
 
+  enum operand_size { int8, int16, int32, uint32, int64 };
+  enum Aqrl { relaxed = 0b00, rl = 0b01, aq = 0b10, aqrl = 0b11 };
+
   Assembler(CodeBuffer* code) : AbstractAssembler(code) {}
 
   // Emit 32-bit instruction
@@ -486,6 +489,30 @@ class Assembler : public AbstractAssembler {
   void ecall()  { emit_int32((0b000 << 12) | SYSTEM); }
   void ebreak() { emit_int32((1 << 20) | (0b000 << 12) | SYSTEM); }
 
+  void csrrw(Register rd, unsigned csr, Register rs1) {
+    emit_int32(((csr & 0xfff) << 20) | ((rs1->encoding() & 0x1f) << 15) | (0b001 << 12) | ((rd->encoding() & 0x1f) << 7) | SYSTEM);
+  }
+  void csrrs(Register rd, unsigned csr, Register rs1) {
+    emit_int32(((csr & 0xfff) << 20) | ((rs1->encoding() & 0x1f) << 15) | (0b010 << 12) | ((rd->encoding() & 0x1f) << 7) | SYSTEM);
+  }
+  void csrrc(Register rd, unsigned csr, Register rs1) {
+    emit_int32(((csr & 0xfff) << 20) | ((rs1->encoding() & 0x1f) << 15) | (0b011 << 12) | ((rd->encoding() & 0x1f) << 7) | SYSTEM);
+  }
+  void csrrwi(Register rd, unsigned csr, unsigned uimm) {
+    emit_int32(((csr & 0xfff) << 20) | ((uimm & 0x1f) << 15) | (0b101 << 12) | ((rd->encoding() & 0x1f) << 7) | SYSTEM);
+  }
+  void csrrsi(Register rd, unsigned csr, unsigned uimm) {
+    emit_int32(((csr & 0xfff) << 20) | ((uimm & 0x1f) << 15) | (0b110 << 12) | ((rd->encoding() & 0x1f) << 7) | SYSTEM);
+  }
+  void csrrci(Register rd, unsigned csr, unsigned uimm) {
+    emit_int32(((csr & 0xfff) << 20) | ((uimm & 0x1f) << 15) | (0b111 << 12) | ((rd->encoding() & 0x1f) << 7) | SYSTEM);
+  }
+  void frflags(Register rd)                { csrrs(rd, 0x001, zr); }
+  void fsflags(Register rd, Register rs)   { csrrw(rd, 0x001, rs); }
+  void fsflags(Register rs)                { csrrw(zr, 0x001, rs); }
+  void fsflagsi(Register rd, unsigned imm) { csrrwi(rd, 0x001, imm); }
+  void fsflagsi(unsigned imm)              { csrrwi(zr, 0x001, imm); }
+
   // -------------------------------------------------------------
   // RV64F and RV64D Floating-Point Standard Extension
   // -------------------------------------------------------------
@@ -552,6 +579,13 @@ class Assembler : public AbstractAssembler {
   void notr(Register rd, Register rs)  { xori(rd, rs, -1); }
   void neg(Register rd, Register rs)   { sub(rd, zr, rs); }
   void negw(Register rd, Register rs)  { subw(rd, zr, rs); }
+  void sext_w(Register rd, Register rs) { addiw(rd, rs, 0); }
+  void zext_b(Register rd, Register rs) { andi(rd, rs, 0xff); }
+  void zext_w(Register rd, Register rs) { slli(rd, rs, 32); srli(rd, rd, 32); }
+  void seqz(Register rd, Register rs)   { sltiu(rd, rs, 1); }
+  void snez(Register rd, Register rs)   { sltu(rd, zr, rs); }
+  void sltz(Register rd, Register rs)   { slt(rd, rs, zr); }
+  void sgtz(Register rd, Register rs)   { slt(rd, zr, rs); }
   void subi(Register rd, Register rs, int32_t imm) { addi(rd, rs, -imm); }
   void j(int32_t offset)               { jal(zr, offset); }
   void jr(Register rs)                 { jalr(zr, rs, 0); }
@@ -580,6 +614,10 @@ class Assembler : public AbstractAssembler {
     if (UseConservativeFence) {
       fence(0xf, 0xf);
     }
+  }
+
+  static inline bool operand_valid_for_add_immediate(int64_t imm) {
+    return is_simm12(imm);
   }
 
   virtual RegisterOrConstant delayed_value_impl(intptr_t* delayed_value_addr,

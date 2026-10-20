@@ -424,9 +424,10 @@ inline NativeMembar *NativeMembar_at(address addr) {
 
 class NativeFenceI : public NativeInstruction {
  public:
-  enum RISCV_specific_constants {
-    instruction_size = 1 * NativeInstruction::instruction_size
-  };
+  static inline int instruction_size() {
+    // 2 for fence.i + fence when UseConservativeFence is enabled
+    return (UseConservativeFence ? 2 : 1) * NativeInstruction::instruction_size;
+  }
 };
 
 #endif // CPU_RISCV_VM_NATIVEINST_RISCV_HPP

@@ -52,8 +52,13 @@ void AdvancedThresholdPolicy::initialize() {
     count = MAX2(log_cpu * loglog_cpu, 1) * 3 / 2;
   }
 
-  set_c1_count(MAX2(count / 3, 1));
-  set_c2_count(MAX2(count - c1_count(), 1));
+  if (TieredStopAtLevel < CompLevel_full_optimization) {
+    set_c1_count(MAX2(count, 1));
+    set_c2_count(0);
+  } else {
+    set_c1_count(MAX2(count / 3, 1));
+    set_c2_count(MAX2(count - c1_count(), 1));
+  }
   FLAG_SET_ERGO(intx, CICompilerCount, c1_count() + c2_count());
 
   // Some inlining tuning

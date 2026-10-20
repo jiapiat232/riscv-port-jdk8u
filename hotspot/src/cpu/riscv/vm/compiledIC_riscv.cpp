@@ -89,8 +89,8 @@ address CompiledStaticCall::emit_to_interp_stub(CodeBuffer &cbuf, address mark) 
 #undef __
 
 int CompiledStaticCall::to_interp_stub_size() {
-  // 1 (fence.i) + 6 (mov_metadata) + 6 (movptr + jalr) = 13 instructions (52 bytes)
-  return (NativeFenceI::instruction_size +
+  // (1 or 2 for ifence) + 6 (mov_metadata) + 6 (movptr + jalr) = 13 or 14 instructions (52 or 56 bytes)
+  return (NativeFenceI::instruction_size() +
           2 * NativeMovConstReg::movptr_instruction_size);
 }
 
@@ -111,7 +111,7 @@ void CompiledStaticCall::set_to_interpreted(methodHandle callee, address entry) 
   }
 
   // Creation also verifies the object.
-  NativeMovConstReg* method_holder = nativeMovConstReg_at(stub + NativeFenceI::instruction_size);
+  NativeMovConstReg* method_holder = nativeMovConstReg_at(stub + NativeFenceI::instruction_size());
   NativeJump*        jump          = nativeJump_at(method_holder->next_instruction_address());
 
 #ifdef ASSERT
@@ -138,7 +138,7 @@ void CompiledStaticCall::set_stub_to_clean(static_stub_Relocation* static_stub) 
   address stub = static_stub->addr();
   assert(stub != NULL, "stub not found");
   // Creation also verifies the object.
-  NativeMovConstReg* method_holder = nativeMovConstReg_at(stub + NativeFenceI::instruction_size);
+  NativeMovConstReg* method_holder = nativeMovConstReg_at(stub + NativeFenceI::instruction_size());
   NativeJump*        jump          = nativeJump_at(method_holder->next_instruction_address());
   method_holder->set_data(0);
   jump->set_jump_destination((address)-1);
@@ -159,7 +159,7 @@ void CompiledStaticCall::verify() {
   address stub = find_stub();
   assert(stub != NULL, "no stub found for static call");
   // Creation also verifies the object.
-  NativeMovConstReg* method_holder = nativeMovConstReg_at(stub + NativeFenceI::instruction_size);
+  NativeMovConstReg* method_holder = nativeMovConstReg_at(stub + NativeFenceI::instruction_size());
   NativeJump*        jump          = nativeJump_at(method_holder->next_instruction_address());
 
   // Verify state.

@@ -174,14 +174,16 @@ const Register c_rarg6  = a6;
 const Register c_rarg7  = a7;
 
 // Java calling convention argument aliases
-const Register j_rarg0  = c_rarg0;
-const Register j_rarg1  = c_rarg1;
-const Register j_rarg2  = c_rarg2;
-const Register j_rarg3  = c_rarg3;
-const Register j_rarg4  = c_rarg4;
-const Register j_rarg5  = c_rarg5;
-const Register j_rarg6  = c_rarg6;
-const Register j_rarg7  = c_rarg7;
+// Shifted by 1 relative to C ABI (matching AArch64 and JDK 19 RISC-V)
+// so that c_rarg0 (x10) is free for JNIEnv* on non-static JNI calls.
+const Register j_rarg0  = c_rarg1;
+const Register j_rarg1  = c_rarg2;
+const Register j_rarg2  = c_rarg3;
+const Register j_rarg3  = c_rarg4;
+const Register j_rarg4  = c_rarg5;
+const Register j_rarg5  = c_rarg6;
+const Register j_rarg6  = c_rarg7;
+const Register j_rarg7  = c_rarg0;
 
 // HotSpot interpreter dedicated registers
 const Register esp       = x20; // x20 (s4): Java expression stack pointer
