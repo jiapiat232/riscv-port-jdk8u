@@ -96,25 +96,29 @@ flowchart TD
 
 为了确保工程可控、步步为营，Phase 3 拆分为 3 个严格递进的子阶段：
 
-#### 【Step 3.0：代码修补、重定位与内联缓存/蹦床层（JIT 前置基座）】
+#### 【Step 3.0：代码修补、重定位与内联缓存/蹦床层（JIT 前置基座）】（已完成 100%，Commit `70797efb1d`）
 * **核心目标**：打通 JIT 编译代码生成、安装（`CodeBuffer::copy_code_to`）、重定位（`Relocation`）、内联缓存（`CompiledIC` / `icBuffer`）与远距离调用蹦床（`NativeCallTrampolineStub`）的全链路机器码修补能力。
-* **涉及源码**：
+* **已交付物**：
   * [`hotspot/src/cpu/riscv/vm/nativeInst_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.hpp) & [`nativeInst_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/nativeInst_riscv.cpp)
   * [`hotspot/src/cpu/riscv/vm/relocInfo_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/relocInfo_riscv.cpp)
   * [`hotspot/src/cpu/riscv/vm/compiledIC_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/compiledIC_riscv.cpp) & [`icBuffer_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/icBuffer_riscv.cpp)
   * [`hotspot/src/cpu/riscv/vm/assembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/assembler_riscv.hpp) & [`macroAssembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp) / [`macroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.cpp)
-* **需解决的核心架构鸿沟**：
+* **跨越的核心架构鸿沟**：
   * **定长可修补 `movptr`（固定 6 条指令 24 字节）vs 变长立即数加载 `li`（1~6 条指令）**：JIT 编译期常发射 `mov_metadata(reg, NULL)` 或 `movoop(reg, jobject)` 并在 `CodeSection` 记录重定位项，待安装或运行期通过 `NativeMovConstReg::set_data` / `Relocation::pd_set_data_value` 回填真实 48 位地址。若 `movptr(..., 0)` 收缩为单条 `mv reg, zr`，运行期按 24 字节回填将直接摧毁后续 5 条指令！
   * **`mov_metadata` / `movoop` 重定位项注册**：确保每次发射可修补元数据/对象引用时向 `code_section()->relocate(pc(), rspec)` 注册重定位记录，并支持压缩指针下的 `li32`（`lui + addiw` 8 字节）`patch_oop`。
   * **RISC-V `jal` $\pm 1\text{MB}$ 跳转范围限制与 `Trampoline` 蹦床桩**：AArch64 的 `bl` 拥有 $\pm 128\text{MB}$ 寻址范围，而 RISC-V 的单指令 `jal` 仅有 $\pm 1\text{MB}$ 范围！在默认最大 240MB 的 CodeCache 中，JIT 方法间调用与 Runtime 调用必须通过 `trampoline_call` + `NativeCallTrampolineStub`（`auipc + ld + jr + 64-bit target`）实现原子可修补远跳。
 
-#### 【Step 3.1：C1 寄存器映射、宏汇编与 Runtime1 运行时桩】
+#### 【Step 3.1：C1 寄存器映射、宏汇编与 Runtime1 运行时桩】（已完成 100%）
 * **核心目标**：建立 C1 编译器的栈帧布局、物理寄存器池分配规则、C1 专用宏汇编与 `Runtime1` 慢速路径 Stubs。
-* **具体任务**：
-  1. [`c1_FrameMap_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_FrameMap_riscv.hpp) / `c1_FrameMap_riscv.cpp`：映射 32 个整型与 32 个浮点物理寄存器的 `LIR_Opr`，隔离保留寄存器（`xthread`, `xheapbase`, `sp`, `fp`, `gp`, `tp`, `t0`, `t1`）；
-  2. [`c1_MacroAssembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_MacroAssembler_riscv.hpp) / `c1_MacroAssembler_riscv.cpp`：实现 C1 内联缓存校验 `inline_cache_check`、编译帧建立 `build_frame`、快速对象/数组分配 `allocate_object` / `allocate_array`、C1 快速锁 `lock_object` / `unlock_object`；
-  3. `c1_CodeStubs_riscv.cpp`：实现转换、范围检查、除零异常、NewInstance、G1 Pre/Post Barrier、Patching、MonitorEnter/Exit 等 C1 尾置慢速桩；
-  4. `c1_Runtime1_riscv.cpp`：生成全部 C1 `Runtime1` 存根（异常展开、对象分配、数组分配、卡表/G1 慢速屏障、反优化与方法修补）。
+* **已交付物**：
+  1. [`c1_FrameMap_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_FrameMap_riscv.hpp) / [`c1_FrameMap_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_FrameMap_riscv.cpp)：映射 22 个可分配通用寄存器（`rnr 0..21`）与 32 个浮点物理寄存器的 `LIR_Opr`，严格隔离 10 个保留寄存器（`xheapbase`, `xthread`, `fp`, `zr`, `ra`, `sp`, `gp`, `tp`, `t0`, `t1` 位于 `rnr 22..31`）；
+  2. [`c1_MacroAssembler_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_MacroAssembler_riscv.hpp) / [`c1_MacroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_MacroAssembler_riscv.cpp)：实现 C1 内联缓存校验 `inline_cache_check`、编译帧建立 `build_frame`、快速对象/数组分配 `allocate_object` / `allocate_array`、C1 快速锁 `lock_object` / `unlock_object`（集成偏向锁与 CAS 轻量级锁）；
+  3. [`c1_CodeStubs_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_CodeStubs_riscv.cpp)：实现转换、范围检查、除零异常、`NewInstance`、`NewTypeArray`、`NewObjectArray`、`G1PreBarrierStub`、`G1PostBarrierStub`、`PatchingStub`、`MonitorEnter/Exit` 等全部 C1 尾置慢速桩；
+  4. [`c1_Runtime1_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_Runtime1_riscv.cpp)：生成全部 C1 `Runtime1` 存根（异常展开、对象分配、数组分配、卡表/G1 慢速屏障、反优化与逆优化式代码修补 `patch_code_riscv`）。
+* **跨越的核心架构鸿沟**：
+  * **JDK 19 `#ifdef DEOPTIMIZE_WHEN_PATCHING` vs JDK 8u `#ifndef TARGET_ARCH_aarch64`**：在 [`c1_Runtime1.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.hpp) / [`c1_Runtime1.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.cpp) 中将 `TARGET_ARCH_riscv` 纳入与 AArch64 相同的逆优化修补机制（`Runtime1::patch_code_riscv`），规避 RVWMO 弱内存序下跨核原地拷贝 24 字节指令流的撕裂风险；
+  * **RISC-V `StubFrame` 顶部 `fp` vs AArch64 底部 `rfp` 偏移差**：精确对齐 `StubFrame::load_argument`（`[fp + offset*8]`）与异常/修补返回地址槽位（`[fp - 8]`），并闭合 `save_live_registers` 中 27 个整数寄存器的奇数对齐填充字与 `OopMap` / `restore_live_registers_except_r10` 的三方契约；
+  * **JDK 8u vs JDK 19 `CodeStubs` 契约适配**：适配双参数 `RangeCheckStub`、无参 `DeoptimizeStub`、多态 `CounterOverflowStub::_method` 以及 JEP 304 之前的内联 `G1Pre/PostBarrierStub`。
 
 #### 【Step 3.2：C1 LIR 生成器与 LIR 汇编器（Milestone 2）】
 * **核心目标**：打通 HIR $\rightarrow$ LIR $\rightarrow$ RISC-V 机器码完整编译流水线。

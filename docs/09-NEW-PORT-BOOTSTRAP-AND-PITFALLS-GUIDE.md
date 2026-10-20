@@ -1526,6 +1526,98 @@ assert(bs->is_a(BarrierSet::CardTableModRef), "Resizeable card table is not supp
    - 若距离超出 `jal` 的 $\pm 1\text{MB}$ 范围，无法用单条 4 字节跳转指令覆盖，此时必须写入一条 4 字节陷阱指令，交由 Linux 信号处理器拦截并重定向 PC 到 `get_handle_wrong_method_stub()`。
    - 我们的 [`os_linux_riscv.cpp:293-297`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/os_cpu/linux_riscv/vm/os_linux_riscv.cpp#L293-L297) 拦截的是 `sig == SIGILL && nativeInstruction_at(pc)->is_sigill_zombie_not_entrant()`（对应编码 `0xffffffff`，即 `NativeIllegalInstruction::instruction_code`）。因此 `patch_verified_entry` 必须写入 `0xffffffff`（触发 `SIGILL`），而绝不能写入 `ebreak`（触发 `SIGTRAP`），从而与信号处理器形成 100% 闭环。
 
+---
+
+### 4.34 C1 寄存器分配池（`c1_FrameMap_riscv.cpp`）中保留寄存器与 `pd_last_allocatable_cpu_reg` 边界陷阱
+
+#### 1. 问题现象与架构挑战
+在实现 C1 编译器的 [`c1_FrameMap_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_FrameMap_riscv.hpp) 与 [`c1_FrameMap_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_FrameMap_riscv.cpp) 时，线性扫描寄存器分配器（`LinearScan`）依赖 `FrameMap::_cpu_rnr2reg` 与 `pd_last_allocatable_cpu_reg` 决定哪些物理寄存器可以被分配给虚拟寄存器（LIR_Opr），哪些必须严格隔离。如果映射顺序或边界常数偏差 1 个槽位，编译出的机器码将直接把普通 Java 局部变量分配到 `xthread`（`x23`）、`xheapbase`（`x27`）、`sp`（`x2`）、`fp`（`x8`）或宏汇编内部跳板 `t0`（`x5`）/ `t1`（`x6`）上，瞬间摧毁 VM 运行时状态！
+
+#### 2. 根因深度剖析
+RISC-V 64 拥有 32 个通用整数寄存器（`x0` ~ `x31`），但在 HotSpot C1 编译器中，有 **10 个整数寄存器** 具有不可侵犯的专用职责，绝不能交给 `LinearScan` 自由分配：
+1. `zr`（`x0`）：硬件零寄存器；
+2. `ra`（`x1`）：返回地址寄存器（跨调用与方法序言/尾声使用）；
+3. `sp`（`x2`）：物理 C/Java 栈指针；
+4. `gp`（`x3`）与 `tp`（`x4`）：Linux RISC-V psABI 全局指针与平台线程指针（禁止触碰）；
+5. `t0`（`x5`）与 `t1`（`x6`）：HotSpot `MacroAssembler` 与 `LIR_Assembler` 的内部临时跳板寄存器（`rscratch1` / `rscratch2`），几乎任何一条宏指令都可能隐式改写它们；
+6. `fp`（`x8` / `s0`）：栈帧指针；
+7. `xthread`（`x23` / `s7`）：当前 `JavaThread*` 指针；
+8. `xheapbase`（`x27` / `s11`）：压缩指针（Compressed Oops）堆基址寄存器。
+
+而 C1 的 `LinearScan` 判断一个 CPU 寄存器号 `rnr`（非物理编码，而是 `map_register(rnr, reg)` 注册的逻辑编号 `0..31`）是否可分配的唯一依据是：
+```cpp
+rnr <= pd_last_allocatable_cpu_reg
+```
+这意味着：**所有 22 个可分配寄存器必须集中映射在逻辑编号 `rnr = 0 .. 21`（即 `pd_last_allocatable_cpu_reg = 21`），而上述 10 个保留寄存器必须严格映射在 `rnr = 22 .. 31`！**
+
+此外，在 JDK 8u 的 `LIR_OprDesc` 契约中：
+- `FrameMap::as_oop_opr(Register r)` 生成的是 `single_cpu` 引用寄存器（因为即便在 64 位平台上，HotSpot C1 的对象引用 `T_OBJECT` / `T_ARRAY` 在 `LIR_Opr` 层面也表示为单槽位 CPU 寄存器 `single_cpu`，只有 `T_LONG` 和 `T_ADDRESS` 的 `as_long_opr` / `as_pointer_opr` 才表示为双槽位 `double_cpu`：`cpu_reg2rnr(r)` 与本身配对！）。
+
+#### 3. 完美解决方案
+在 [`c1_FrameMap_riscv.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_FrameMap_riscv.hpp#L48-L62) 与 [`c1_FrameMap_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_FrameMap_riscv.cpp#L110-L185) 中：
+1. 将 `x10~x17`（`a0~a7`）、`x28~x31`（`t3~t6`）、`x7`（`t2`）、`x9`（`s1`）、`x18~x22`（`s2~s6`）、`x24~x26`（`s8~s10`）共 **22 个通用寄存器** 依次映射至 `rnr = 0..21`，并将 `pd_last_allocatable_cpu_reg` 设为 `21`；
+2. 将 `xheapbase(x27)`、`xthread(x23)`、`fp(x8)`、`zr(x0)`、`ra(x1)`、`sp(x2)`、`gp(x3)`、`tp(x4)`、`t0(x5)`、`t1(x6)` 依次映射至不可分配区间 `rnr = 22..31`。
+
+---
+
+### 4.35 C1 `DEOPTIMIZE_WHEN_PATCHING` 机制差异与未解析类/字段的跨版本修补鸿沟
+
+#### 1. 问题现象与架构鸿沟
+当 C1 编译一个方法时，如果方法内引用的某个类尚未初始化、或者某个字段的偏移量尚未解析（Unresolved Field / Klass / Mirror / Appendix），C1 会生成一个 `PatchingStub` 跳入 `Runtime1::access_field_patching_id` 或 `load_klass_patching_id`。
+在对比 `/Users/wujiahua/code/jdk19/src/hotspot/cpu/riscv/` 与本仓 JDK 8u 时，发现了一个极其关键的跨版本架构差异：
+1. **JDK 19 的 `DEOPTIMIZE_WHEN_PATCHING` 共享宏**：
+   - 在 JDK 19 中，`globalDefinitions_riscv.hpp` 定义了 `#define DEOPTIMIZE_WHEN_PATCHING`，且共享代码 `c1_Runtime1.cpp` 中使用 `#ifdef DEOPTIMIZE_WHEN_PATCHING` 统一将修补动作转为直接触发调用方栈帧逆优化（`deoptimize`），从而省去了在运行期跨核自修改多条机器指令的复杂同步。
+2. **JDK 8u 的 `#ifndef TARGET_ARCH_aarch64` 硬编码分支**：
+   - 而在 **JDK 8u** 的 [`c1_Runtime1.hpp:132-139`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.hpp#L132-L139) 与 [`c1_Runtime1.cpp:1066-1277`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.cpp#L1066-L1277) 中，**根本不存在 `DEOPTIMIZE_WHEN_PATCHING` 宏**！
+   - JDK 8u 的 `c1_Runtime1.cpp` 默认所有非 `TARGET_ARCH_aarch64` 架构都走 x86 风格的 `Runtime1::patch_code`：它会把 `PatchingStub` 中备份的待修补机器码按字节拷贝覆盖主代码区的 `nop` 序列，并调用 `NativeGeneralJump::replace_mt_safe`！
+   - 在 RISC-V（RVWMO 弱内存模型 + 无跨核硬件 I-Cache 自动同步）上，一个 `movptr` 长达 6 条指令（24 字节），如果在多线程并发执行且未进入 Safepoint 的情况下原地按字节拷贝修改 24 字节指令流，其他正在执行该代码段的 CPU 核心极易读到半新半旧的指令流而崩溃！
+
+#### 2. 完美解决方案
+严格遵循“三位一体”范式，对齐本仓 JDK 8u AArch64 的设计（[`c1_Runtime1.hpp:132-143`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.hpp#L132-L143)、[`c1_Runtime1.cpp:1280`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.cpp#L1280)）：
+1. 在 [`c1_Runtime1.hpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.hpp) 中声明 `static int patch_code_riscv(JavaThread* thread, StubID stub_id);`，并在 [`c1_Runtime1.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.cpp) 中将 `TARGET_ARCH_riscv` 加入 `#if !defined(TARGET_ARCH_aarch64) && !defined(TARGET_ARCH_riscv)` 屏蔽宏；
+2. 在 [`c1_Runtime1_riscv.cpp:801-922`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_Runtime1_riscv.cpp#L801-L922) 中实现 `Runtime1::patch_code_riscv` 与 `generate_patching`：当首次命中最慢路径时，先在 C++ 层完成类加载/字段解析/类初始化，随即将当前 `nmethod` 标记为 `make_not_entrant()` 并调用 `Deoptimization::deoptimize_frame(thread, caller_frame.id())` 回退到解释器执行，下次编译时直接生成无桩的全速代码！
+
+---
+
+### 4.36 C1 `StubFrame` 栈帧布局、`fp` 基准偏移与 `save_live_registers` 奇偶对齐槽位的三方契约
+
+#### 1. 问题现象与架构鸿沟
+在实现 [`c1_Runtime1_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_Runtime1_riscv.cpp) 时，如果照搬 AArch64 的 `StubFrame::load_argument` 偏移计算或忽略 `push_reg` 的 16 字节对齐填充槽位，会导致：
+- `new_type_array` / `new_object_array` / `new_multi_array` 从栈上加载的参数错位 16 字节（读出 `ra` 和 `old_fp` 当作 `klass` 或 `length`）；
+- `handle_exception_from_callee` 和 `generate_patching` 覆写错误的栈槽，导致异常捕获或逆优化返回时跳飞；
+- `OopMap` 记录的寄存器保存位置与物理栈帧偏离 1 个机器字（8 字节），GC 扫描 `Runtime1` Stub 栈帧时全部读错寄存器！
+
+#### 2. 根因深度剖析
+1. **RISC-V `fp`（栈帧顶部）vs AArch64 `rfp`（栈帧底部）的 16 字节基准差**：
+   - 在 AArch64 中，`enter()` 执行 `stp rfp, lr, [sp, #-16]!; mov rfp, sp`，此时 `rfp` 指向当前栈帧**底部**（`[rfp + 0] = old_fp`，`[rfp + 8] = lr`，`[rfp + 16]` 才是调用者的 `caller_sp`）。因此 AArch64 的 `StubFrame::load_argument` 访问 `[rfp + (offset_in_words + 2) * 8]`，且异常返回地址保存在 `[rfp + 8]`（`rfp, wordSize`）。
+   - 而在本仓 **RISC-V** 中，[`MacroAssembler::enter()`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/macroAssembler_riscv.hpp#L384-L390)（即 `build_frame(16)`）令 **`fp` 指向栈帧顶部（即调用者的 `caller_sp`）**，而 `ra` 保存在 **`[fp - 8]`**（`frame::return_addr_offset == -1`），`old_fp` 保存在 **`[fp - 16]`**（`frame::link_offset == -2`）！
+   - 因此，在 RISC-V 的 `StubFrame` 中，调用者压栈的参数位于 **`[fp + offset_in_words * 8]`**（通过 `load_parameter(offset_in_words, reg)` 访问），而 `generate_handle_exception` 和 `generate_patching` 读取/修补返回地址时，必须访问 **`Address(fp, frame::return_addr_offset * BytesPerWord)`（即 `[fp - 8]`）**！
+2. **`save_live_registers` 中 27 个整数寄存器的奇数对齐槽位与 `restore_live_registers_except_r10` 的精妙对偶**：
+   - 在 [`c1_Runtime1_riscv.cpp:178-236`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_Runtime1_riscv.cpp#L178-L236) 中，`save_live_registers` 通过 `push_reg(RegSet::range(x5, x31), sp)` 保存 `x5..x31` 共 **27 个整数寄存器（奇数）**。
+   - 根据 `MacroAssembler::push_reg` 的 16 字节对齐规则，当寄存器数量为奇数时，会在 `sp` 最低地址处（即紧贴随后压栈的 32 个浮点寄存器上方）**自动预留 1 个 8 字节对齐槽位（2 个 32-bit VMReg 槽位）**，使整数寄存器区共占用 $27 + 1 = 28$ 个机器字！加上 32 个浮点寄存器（32 words）和 `enter()` 的 `ra + fp`（2 words），总栈帧大小严格为 **`reg_save_frame_size = 62` words**。
+   - 因此，在 `Runtime1::initialize_pd()` 计算 `OopMap` 偏移表时，遍历完 `f0..f31`（占用 `sp_offset = 0..64`）后，**必须先执行 `sp_offset += 2` 跳过这 1 个对齐字**，再从 `sp_offset = 66` 开始依次映射 `x5..x31`（`66..118`）！
+   - 更精妙的是，在 `restore_live_registers_except_r10`（保持返回值寄存器 `x10` 不被恢复覆盖）中，连续调用两次 `pop_reg`：
+     - 第一次：`pop_reg(RegSet::range(x5, x9), sp)` —— 弹出 **5 个寄存器（奇数）**，`pop_reg` 自动跳过 1 个 word 对齐槽位，共令 `sp += 6 * 8`；
+     - 第二次：`pop_reg(RegSet::range(x11, x31), sp)` —— 弹出 **21 个寄存器（奇数）**，`pop_reg` 在起始偏移处再次跳过 1 个 word，而这个被跳过的 word **恰好就是 `x10` 在栈上的保存槽位**！两次 `pop_reg` 总计弹出 $6 + 22 = 28$ words，与 `push_reg(x5..x31)` 的 28 words 严丝合缝！
+
+---
+
+### 4.37 JDK 8 vs JDK 19 在 `CodeStubs`（`RangeCheckStub` / `DeoptimizeStub` / `G1*BarrierStub`）上的四处契约差异
+
+#### 1. 问题现象与架构鸿沟
+在将 JDK 19 的 `c1_CodeStubs_riscv.cpp` 移植到 JDK 8u（[`c1_CodeStubs_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_CodeStubs_riscv.cpp)）时，存在四处因 JEP 演进而产生的签名与行为鸿沟：
+1. **鸿沟一：`RangeCheckStub` 在 JDK 8u 中是双参数而非三参数**：
+   - JDK 19 的 `RangeCheckStub(CodeEmitInfo* info, LIR_Opr index, LIR_Opr array)` 接收 `array` 操作数以生成包含数组长度的详细异常信息（`throw_range_check_failed(index, array)`）；
+   - 而 JDK 8u 的 [`c1_CodeStubs.hpp:208`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_CodeStubs.hpp#L208) 构造函数是 `RangeCheckStub(CodeEmitInfo* info, LIR_Opr index, bool throw_index_out_of_bounds_exception)`，根本没有 `_array` 成员！其慢路径 `Runtime1::range_check_failed_id` 只接收 `t0` 中的 `index` 单个参数（调用 `generate_exception_throw(sasm, CAST_FROM_FN_PTR(address, throw_range_check_failed), true)`）。
+2. **鸿沟二：`DeoptimizeStub` 在 JDK 8u 中不带 `trap_request` 参数**：
+   - JDK 19 的 `DeoptimizeStub` 将 `_trap_request` 装入 `t0` 传给 `Runtime1::deoptimize(JavaThread* thread, jint trap_request)`；
+   - 而 JDK 8u 的 [`Runtime1::deoptimize(JavaThread* thread)`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/share/vm/c1/c1_Runtime1.cpp#L533) 是单参数函数，`DeoptimizeStub::emit_code` 直接 `far_call(Runtime1::entry_for(Runtime1::deoptimize_id))` 即可。
+3. **鸿沟三：`CounterOverflowStub::_method` 在 JDK 8u 中可能是寄存器或元数据常量**：
+   - JDK 8u 的 `LIRGenerator` 通过 `LIR_Opr` 传递 `_method`，因此在 [`CounterOverflowStub::emit_code`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_CodeStubs_riscv.cpp#L67-L82) 中需要同时兼容 `_method->is_single_cpu()`（直接 `ce->store_parameter(_method->as_register(), 0)`）与 `_method->is_constant()`（通过 `mov_metadata(t0, m)` 后压栈）两种形态。
+4. **鸿沟四：G1 C1 Pre/Post Barrier Stub 归属位置（JEP 304 之前）**：
+   - JDK 19 将 `G1PreBarrierStub` / `G1PostBarrierStub` 迁入了 `gc/g1/c1/g1BarrierSetC1.cpp`；
+   - 而 JDK 8u 尚未引入 `BarrierSetC1`，`G1PreBarrierStub::emit_code` 与 `G1PostBarrierStub::emit_code` 必须在 [`c1_CodeStubs_riscv.cpp:259-341`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_CodeStubs_riscv.cpp#L259-L341) 中实现，对应的慢速队列刷新桩 `g1_pre_barrier_slow_id` 与 `g1_post_barrier_slow_id` 则在 [`c1_Runtime1_riscv.cpp:668-785`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_Runtime1_riscv.cpp#L668-L785) 中生成。
+
 
 如果未来要在 OpenJDK 8u 中移植另一个全新的指令集架构（如某个专有 ASIC、DSP 或新一代开放架构），可直接按照本工程总结的核对清单推进 Phase 1：
 

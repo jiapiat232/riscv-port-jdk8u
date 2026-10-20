@@ -140,6 +140,12 @@ class MacroAssembler: public Assembler {
   int  pop_reg(unsigned int bitset, Register stack);
   void push_reg(RegSet regs, Register stack) { if (regs.bits()) { push_reg(regs.bits(), stack); } }
   void pop_reg(RegSet regs, Register stack) { if (regs.bits()) { pop_reg(regs.bits(), stack); } }
+  void push_call_clobbered_registers_except(RegSet exclude);
+  void pop_call_clobbered_registers_except(RegSet exclude);
+  void push_call_clobbered_registers() { push_call_clobbered_registers_except(RegSet()); }
+  void pop_call_clobbered_registers() { pop_call_clobbered_registers_except(RegSet()); }
+  void push_CPU_state();
+  void pop_CPU_state();
   void enter();
   void leave();
 
@@ -157,8 +163,10 @@ class MacroAssembler: public Assembler {
   void call(address entry);
   void jmp(address entry);
   void far_jump(address entry) { jmp(entry); }
-  void far_jump(const Address& entry, Register tmp = t0);
-  void far_call(const Address& entry, Register tmp = t0);
+  void far_jump(const Address& entry, CodeBuffer* cbuf = NULL, Register tmp = t0);
+  void far_jump(const Address& entry, Register tmp) { far_jump(entry, NULL, tmp); }
+  void far_call(const Address& entry, CodeBuffer* cbuf = NULL, Register tmp = t0);
+  void far_call(const Address& entry, Register tmp) { far_call(entry, NULL, tmp); }
   void la_patchable(Register reg1, const Address& dest, int32_t& offset);
 
   address trampoline_call(Address entry, CodeBuffer* cbuf = NULL);
@@ -183,24 +191,39 @@ class MacroAssembler: public Assembler {
   using Assembler::jal;
   using Assembler::jalr;
 
-  void beq(Register rs1, Register rs2, Label& L);
-  void bne(Register rs1, Register rs2, Label& L);
-  void blt(Register rs1, Register rs2, Label& L);
-  void bge(Register rs1, Register rs2, Label& L);
-  void bltu(Register rs1, Register rs2, Label& L);
-  void bgeu(Register rs1, Register rs2, Label& L);
+  void beq(Register rs1, Register rs2, Label& L, bool is_far = false);
+  void bne(Register rs1, Register rs2, Label& L, bool is_far = false);
+  void blt(Register rs1, Register rs2, Label& L, bool is_far = false);
+  void bge(Register rs1, Register rs2, Label& L, bool is_far = false);
+  void bltu(Register rs1, Register rs2, Label& L, bool is_far = false);
+  void bgeu(Register rs1, Register rs2, Label& L, bool is_far = false);
 
-  void bgt(Register rs1, Register rs2, Label& L)  { blt(rs2, rs1, L); }
-  void ble(Register rs1, Register rs2, Label& L)  { bge(rs2, rs1, L); }
-  void bgtu(Register rs1, Register rs2, Label& L) { bltu(rs2, rs1, L); }
-  void bleu(Register rs1, Register rs2, Label& L) { bgeu(rs2, rs1, L); }
+  void bgt(Register rs1, Register rs2, Label& L, bool is_far = false)  { blt(rs2, rs1, L, is_far); }
+  void ble(Register rs1, Register rs2, Label& L, bool is_far = false)  { bge(rs2, rs1, L, is_far); }
+  void bgtu(Register rs1, Register rs2, Label& L, bool is_far = false) { bltu(rs2, rs1, L, is_far); }
+  void bleu(Register rs1, Register rs2, Label& L, bool is_far = false) { bgeu(rs2, rs1, L, is_far); }
 
-  void beqz(Register rs, Label& L) { beq(rs, zr, L); }
-  void bnez(Register rs, Label& L) { bne(rs, zr, L); }
-  void blez(Register rs, Label& L) { bge(zr, rs, L); }
-  void bgez(Register rs, Label& L) { bge(rs, zr, L); }
-  void bltz(Register rs, Label& L) { blt(rs, zr, L); }
-  void bgtz(Register rs, Label& L) { blt(zr, rs, L); }
+  void beqz(Register rs, Label& L, bool is_far = false) { beq(rs, zr, L, is_far); }
+  void bnez(Register rs, Label& L, bool is_far = false) { bne(rs, zr, L, is_far); }
+  void blez(Register rs, Label& L, bool is_far = false) { bge(zr, rs, L, is_far); }
+  void bgez(Register rs, Label& L, bool is_far = false) { bge(rs, zr, L, is_far); }
+  void bltz(Register rs, Label& L, bool is_far = false) { blt(rs, zr, L, is_far); }
+  void bgtz(Register rs, Label& L, bool is_far = false) { blt(zr, rs, L, is_far); }
+
+  // Floating-point compare and branch
+  void float_beq(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void float_bne(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void float_ble(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void float_blt(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void float_bge(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void float_bgt(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+
+  void double_beq(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void double_bne(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void double_ble(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void double_blt(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void double_bge(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
+  void double_bgt(FloatRegister Rs1, FloatRegister Rs2, Label& L, bool is_far = false, bool is_unordered = false);
 
   void j(Label& L);
   void j(const Address& entry, Register tmp = t0) { far_jump(entry, tmp); }
@@ -235,6 +258,10 @@ class MacroAssembler: public Assembler {
   // Rd = (Rs1 << shamt) + Rs2
   void shift_left_add(Register Rd, Register Rs1, Register Rs2, int shamt);
   void shift_left_add(Register Rd, Register Rs1, Register Rs2, int shamt, Register tmp);
+  void shadd(Register Rd, Register Rs1, Register Rs2, Register tmp, int shamt) {
+    shift_left_add(Rd, Rs1, Rs2, shamt, tmp);
+  }
+  Address form_address(Register Rd, Register base, long byte_offset);
 
   void andrw(Register rd, Register rs1, Register rs2) { andr(rd, rs1, rs2); addiw(rd, rd, 0); }
   void orrw(Register rd, Register rs1, Register rs2)  { orr(rd, rs1, rs2); addiw(rd, rd, 0); }
@@ -305,14 +332,15 @@ class MacroAssembler: public Assembler {
   }
 
   // Klass encoding/decoding and loading/storing
-  void encode_klass_not_null(Register r, Register tmp = t0);
+  void encode_klass_not_null(Register r);
   void encode_klass_not_null(Register dst, Register src, Register tmp = t0);
-  void decode_klass_not_null(Register r, Register tmp = t0);
+  void decode_klass_not_null(Register r);
   void decode_klass_not_null(Register dst, Register src, Register tmp = t0);
   void load_klass(Register dst, Register src);
   void store_klass(Register dst, Register src);
   void store_klass_gap(Register dst, Register src);
   void load_prototype_header(Register dst, Register src);
+  void cmp_klass(Register oop, Register trial_klass, Register tmp, Label &L);
 
   // Atomic CAS and Biased Locking support (JDK 8u architecture + RISC-V LR/SC)
   void cmpxchgptr(Register oldv, Register newv, Register addr, Register tmp,
@@ -336,13 +364,25 @@ class MacroAssembler: public Assembler {
                                      Register temp_reg,
                                      Label* L_success,
                                      Label* L_failure,
-                                     Label* L_slow_path);
+                                     Label* L_slow_path,
+                                     Register super_check_offset = noreg);
+  void check_klass_subtype_slow_path(Register sub_klass,
+                                     Register super_klass,
+                                     Register tmp1_reg,
+                                     Register tmp2_reg,
+                                     Label* L_success,
+                                     Label* L_failure);
   void check_klass_subtype_slow_path_linear(Register sub_klass,
                                             Register super_klass,
                                             Register tmp1_reg,
                                             Register tmp2_reg,
                                             Label* L_success,
                                             Label* L_failure);
+  void repne_scan(Register addr, Register value, Register count, Register tmp);
+
+  Address add_memory_helper(const Address dst);
+  void add_memory_int64(const Address dst, int64_t imm);
+  void add_memory_int32(const Address dst, int32_t imm);
 
   // Method lookup
   void lookup_virtual_method(Register recv_klass,
@@ -356,13 +396,27 @@ class MacroAssembler: public Assembler {
                                Label& L_no_such_interface,
                                bool return_method = true);
 
-  // Allocation
+  // Allocation & Zeroing
   void tlab_allocate(Register obj,
                      Register var_size_in_bytes,
                      int con_size_in_bytes,
                      Register t1,
                      Register t2,
-                     Label& slow_case);
+                     Label& slow_case,
+                     bool is_far = false);
+  void eden_allocate(Register obj,
+                     Register var_size_in_bytes,
+                     int con_size_in_bytes,
+                     Register t1,
+                     Label& slow_case,
+                     bool is_far = false);
+  void incr_allocated_bytes(Register thread,
+                            Register var_size_in_bytes,
+                            int con_size_in_bytes,
+                            Register t1);
+  void zero_memory(Register addr, Register len, Register tmp);
+  void zero_words(Register base, uint64_t cnt);
+  void fill_words(Register base, Register cnt, Register value);
 
 #if INCLUDE_ALL_GCS
   void g1_write_barrier_pre(Register obj,

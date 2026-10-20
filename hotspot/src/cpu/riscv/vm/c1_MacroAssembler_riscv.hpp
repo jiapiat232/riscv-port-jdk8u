@@ -55,7 +55,17 @@ using MacroAssembler::null_check;
                  Register result);
 
   // locking
-  void lock_object  (Register swap, Register obj, Register disp_hdr, Register scratch, Label& slow_case);
+  // hdr     : must be x10, contents destroyed
+  // obj     : must point to the object to lock, contents preserved
+  // disp_hdr: must point to the displaced header location, contents preserved
+  // scratch : scratch register, contents destroyed
+  // returns code offset at which to add null check debug information
+  int lock_object  (Register swap, Register obj, Register disp_hdr, Register scratch, Label& slow_case);
+
+  // unlocking
+  // hdr     : contents destroyed
+  // obj     : must point to the object to lock, contents preserved
+  // disp_hdr: must be x10 & must point to the displaced header location, contents destroyed
   void unlock_object(Register swap, Register obj, Register lock, Label& slow_case);
 
   void initialize_object(
@@ -64,7 +74,8 @@ using MacroAssembler::null_check;
     Register var_size_in_bytes,        // object size in bytes if unknown at compile time; invalid otherwise
     int      con_size_in_bytes,        // object size in bytes if known at compile time
     Register tmp1,                     // temp register
-    Register tmp2                      // temp register
+    Register tmp2,                     // temp register
+    bool     is_tlab_allocated = false // the object was allocated in a TLAB; relevant for the implementation of ZeroTLAB
   );
 
   // allocation of fixed-size objects
@@ -88,13 +99,28 @@ using MacroAssembler::null_check;
     Register len,                      // array length
     Register tmp1,                     // temp register
     Register tmp2,                     // temp register
-    int      array_header_size,        // array header size in bytes
-    int      element_size,             // element size in bytes
+    int      array_header_size,        // array header size in words
+    int      element_size,             // element scale factor
     Register klass,                    // object klass
     Label&   slow_case                 // continuation point if fast allocation fails
   );
 
-  // invalidates obj for debugging
-  void invalidate_done() PRODUCT_RETURN;
+  int  rsp_offset() const { return _rsp_offset; }
+  void set_rsp_offset(int n) { _rsp_offset = n; }
+
+  void invalidate_registers(bool inv_x10, bool inv_x9, bool inv_x12, bool inv_x13, bool inv_x14, bool inv_x15) PRODUCT_RETURN;
+  void invalidate_done() PRODUCT_RETURN {}
+
+  // This platform only uses signal-based null checks. The Label is not needed.
+  void null_check(Register r, Label *Lnull = NULL) { MacroAssembler::null_check(r); }
+
+  void load_parameter(int offset_in_words, Register reg);
+
+  void inline_cache_check(Register receiver, Register iCache, Label &L);
+
+  static const int c1_double_branch_mask = 1 << 3; // depend on c1_float_cond_branch
+  void c1_cmp_branch(int cmpFlag, Register op1, Register op2, Label& label, BasicType type, bool is_far);
+  void c1_float_cmp_branch(int cmpFlag, FloatRegister op1, FloatRegister op2, Label& label,
+                           bool is_far, bool is_unordered = false);
 
 #endif // CPU_RISCV_VM_C1_MACROASSEMBLER_RISCV_HPP

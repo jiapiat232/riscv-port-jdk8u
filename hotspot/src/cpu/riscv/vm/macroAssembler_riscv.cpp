@@ -443,6 +443,54 @@ int MacroAssembler::pop_reg(unsigned int bitset, Register stack) {
   return count;
 }
 
+void MacroAssembler::push_call_clobbered_registers_except(RegSet exclude) {
+  // Push integer registers x7, x10-x17, x28-x31.
+  push_reg(RegSet::of(x7) + RegSet::range(x10, x17) + RegSet::range(x28, x31) - exclude, sp);
+
+  // Push float registers f0-f7, f10-f17, f28-f31 (20 caller-saved float regs).
+  subi(sp, sp, wordSize * 20);
+  int offset = 0;
+  for (int i = 0; i < 32; i++) {
+    if (i <= f7->encoding() || i >= f28->encoding() || (i >= f10->encoding() && i <= f17->encoding())) {
+      fsd(as_FloatRegister(i), Address(sp, wordSize * (offset++)));
+    }
+  }
+}
+
+void MacroAssembler::pop_call_clobbered_registers_except(RegSet exclude) {
+  int offset = 0;
+  for (int i = 0; i < 32; i++) {
+    if (i <= f7->encoding() || i >= f28->encoding() || (i >= f10->encoding() && i <= f17->encoding())) {
+      fld(as_FloatRegister(i), Address(sp, wordSize * (offset++)));
+    }
+  }
+  addi(sp, sp, wordSize * 20);
+
+  pop_reg(RegSet::of(x7) + RegSet::range(x10, x17) + RegSet::range(x28, x31) - exclude, sp);
+}
+
+void MacroAssembler::push_CPU_state() {
+  // integer registers, except zr(x0) & ra(x1) & sp(x2) & gp(x3) & tp(x4)
+  push_reg(0xffffffe0, sp);
+
+  // float registers
+  subi(sp, sp, 32 * wordSize);
+  for (int i = 0; i < 32; i++) {
+    fsd(as_FloatRegister(i), Address(sp, i * wordSize));
+  }
+}
+
+void MacroAssembler::pop_CPU_state() {
+  // float registers
+  for (int i = 0; i < 32; i++) {
+    fld(as_FloatRegister(i), Address(sp, i * wordSize));
+  }
+  addi(sp, sp, 32 * wordSize);
+
+  // integer registers, except zr(x0) & ra(x1) & sp(x2) & gp(x3) & tp(x4)
+  pop_reg(0xffffffe0, sp);
+}
+
 void MacroAssembler::enter() {
   build_frame(16);
 }
@@ -482,7 +530,7 @@ void MacroAssembler::la_patchable(Register reg1, const Address &dest, int32_t &o
   }
 }
 
-void MacroAssembler::far_jump(const Address& entry, Register tmp) {
+void MacroAssembler::far_jump(const Address& entry, CodeBuffer* cbuf, Register tmp) {
   assert(ReservedCodeCacheSize < 4*G, "branch out of range");
   if (entry.getMode() == Address::literal) {
     assert(CodeCache::find_blob(entry.target()) != NULL || !far_branches() || entry.target() != NULL,
@@ -490,8 +538,10 @@ void MacroAssembler::far_jump(const Address& entry, Register tmp) {
     int32_t offset = 0;
     if (far_branches() || !CodeCache::contains(entry.target()) || !reachable_from_branch_at(pc(), entry.target())) {
       la_patchable(tmp, entry, offset);
+      if (cbuf != NULL) { cbuf->set_insts_mark(); }
       jalr(zr, tmp, offset);
     } else {
+      if (cbuf != NULL) { cbuf->set_insts_mark(); }
       InstructionMark im(this);
       code_section()->relocate(pc(), entry.rspec());
       int32_t distance = (int32_t)(entry.target() - pc());
@@ -500,18 +550,21 @@ void MacroAssembler::far_jump(const Address& entry, Register tmp) {
   } else {
     movptr(tmp, entry.offset());
     add(tmp, entry.base(), tmp);
+    if (cbuf != NULL) { cbuf->set_insts_mark(); }
     jalr(zr, tmp, 0);
   }
 }
 
-void MacroAssembler::far_call(const Address& entry, Register tmp) {
+void MacroAssembler::far_call(const Address& entry, CodeBuffer* cbuf, Register tmp) {
   assert(ReservedCodeCacheSize < 4*G, "branch out of range");
   if (entry.getMode() == Address::literal) {
     int32_t offset = 0;
     if (far_branches() || !CodeCache::contains(entry.target()) || !reachable_from_branch_at(pc(), entry.target())) {
       la_patchable(tmp, entry, offset);
+      if (cbuf != NULL) { cbuf->set_insts_mark(); }
       jalr(ra, tmp, offset);
     } else {
+      if (cbuf != NULL) { cbuf->set_insts_mark(); }
       InstructionMark im(this);
       code_section()->relocate(pc(), entry.rspec());
       int32_t distance = (int32_t)(entry.target() - pc());
@@ -520,6 +573,7 @@ void MacroAssembler::far_call(const Address& entry, Register tmp) {
   } else {
     movptr(tmp, entry.offset());
     add(tmp, entry.base(), tmp);
+    if (cbuf != NULL) { cbuf->set_insts_mark(); }
     jalr(ra, tmp, 0);
   }
 }
@@ -662,7 +716,14 @@ void MacroAssembler::la(Register Rd, Label& L) {
 // -------------------------------------------------------------
 // Branch and Jump with Labels
 // -------------------------------------------------------------
-void MacroAssembler::beq(Register rs1, Register rs2, Label& L) {
+void MacroAssembler::beq(Register rs1, Register rs2, Label& L, bool is_far) {
+  if (is_far) {
+    Label done;
+    Assembler::bne(rs1, rs2, 8);
+    j(L);
+    bind(done);
+    return;
+  }
   if (L.is_bound()) {
     int32_t offset = target(L) - pc();
     Assembler::beq(rs1, rs2, offset);
@@ -672,7 +733,14 @@ void MacroAssembler::beq(Register rs1, Register rs2, Label& L) {
   }
 }
 
-void MacroAssembler::bne(Register rs1, Register rs2, Label& L) {
+void MacroAssembler::bne(Register rs1, Register rs2, Label& L, bool is_far) {
+  if (is_far) {
+    Label done;
+    Assembler::beq(rs1, rs2, 8);
+    j(L);
+    bind(done);
+    return;
+  }
   if (L.is_bound()) {
     int32_t offset = target(L) - pc();
     Assembler::bne(rs1, rs2, offset);
@@ -682,7 +750,14 @@ void MacroAssembler::bne(Register rs1, Register rs2, Label& L) {
   }
 }
 
-void MacroAssembler::blt(Register rs1, Register rs2, Label& L) {
+void MacroAssembler::blt(Register rs1, Register rs2, Label& L, bool is_far) {
+  if (is_far) {
+    Label done;
+    Assembler::bge(rs1, rs2, 8);
+    j(L);
+    bind(done);
+    return;
+  }
   if (L.is_bound()) {
     int32_t offset = target(L) - pc();
     Assembler::blt(rs1, rs2, offset);
@@ -692,7 +767,14 @@ void MacroAssembler::blt(Register rs1, Register rs2, Label& L) {
   }
 }
 
-void MacroAssembler::bge(Register rs1, Register rs2, Label& L) {
+void MacroAssembler::bge(Register rs1, Register rs2, Label& L, bool is_far) {
+  if (is_far) {
+    Label done;
+    Assembler::blt(rs1, rs2, 8);
+    j(L);
+    bind(done);
+    return;
+  }
   if (L.is_bound()) {
     int32_t offset = target(L) - pc();
     Assembler::bge(rs1, rs2, offset);
@@ -702,7 +784,14 @@ void MacroAssembler::bge(Register rs1, Register rs2, Label& L) {
   }
 }
 
-void MacroAssembler::bltu(Register rs1, Register rs2, Label& L) {
+void MacroAssembler::bltu(Register rs1, Register rs2, Label& L, bool is_far) {
+  if (is_far) {
+    Label done;
+    Assembler::bgeu(rs1, rs2, 8);
+    j(L);
+    bind(done);
+    return;
+  }
   if (L.is_bound()) {
     int32_t offset = target(L) - pc();
     Assembler::bltu(rs1, rs2, offset);
@@ -712,7 +801,14 @@ void MacroAssembler::bltu(Register rs1, Register rs2, Label& L) {
   }
 }
 
-void MacroAssembler::bgeu(Register rs1, Register rs2, Label& L) {
+void MacroAssembler::bgeu(Register rs1, Register rs2, Label& L, bool is_far) {
+  if (is_far) {
+    Label done;
+    Assembler::bltu(rs1, rs2, 8);
+    j(L);
+    bind(done);
+    return;
+  }
   if (L.is_bound()) {
     int32_t offset = target(L) - pc();
     Assembler::bgeu(rs1, rs2, offset);
@@ -721,6 +817,64 @@ void MacroAssembler::bgeu(Register rs1, Register rs2, Label& L) {
     Assembler::bgeu(rs1, rs2, 0);
   }
 }
+
+// Float compare branch instructions
+#define INSN(NAME, FLOATCMP, BRANCH)                                                                                   \
+  void MacroAssembler::float_##NAME(FloatRegister Rs1, FloatRegister Rs2, Label &l, bool is_far, bool is_unordered) {  \
+    FLOATCMP##_s(t0, Rs1, Rs2);                                                                                        \
+    BRANCH(t0, l, is_far);                                                                                             \
+  }                                                                                                                    \
+  void MacroAssembler::double_##NAME(FloatRegister Rs1, FloatRegister Rs2, Label &l, bool is_far, bool is_unordered) { \
+    FLOATCMP##_d(t0, Rs1, Rs2);                                                                                        \
+    BRANCH(t0, l, is_far);                                                                                             \
+  }
+
+  INSN(beq, feq, bnez);
+  INSN(bne, feq, beqz);
+
+#undef INSN
+
+#define INSN(NAME, FLOATCMP1, FLOATCMP2)                                              \
+  void MacroAssembler::float_##NAME(FloatRegister Rs1, FloatRegister Rs2, Label &l,   \
+                                    bool is_far, bool is_unordered) {                 \
+    if (is_unordered) {                                                               \
+      FLOATCMP2##_s(t0, Rs2, Rs1);                                                    \
+      beqz(t0, l, is_far);                                                            \
+    } else {                                                                          \
+      FLOATCMP1##_s(t0, Rs1, Rs2);                                                    \
+      bnez(t0, l, is_far);                                                            \
+    }                                                                                 \
+  }                                                                                   \
+  void MacroAssembler::double_##NAME(FloatRegister Rs1, FloatRegister Rs2, Label &l,  \
+                                     bool is_far, bool is_unordered) {                \
+    if (is_unordered) {                                                               \
+      FLOATCMP2##_d(t0, Rs2, Rs1);                                                    \
+      beqz(t0, l, is_far);                                                            \
+    } else {                                                                          \
+      FLOATCMP1##_d(t0, Rs1, Rs2);                                                    \
+      bnez(t0, l, is_far);                                                            \
+    }                                                                                 \
+  }
+
+  INSN(ble, fle, flt);
+  INSN(blt, flt, fle);
+
+#undef INSN
+
+#define INSN(NAME, CMP)                                                              \
+  void MacroAssembler::float_##NAME(FloatRegister Rs1, FloatRegister Rs2, Label &l,  \
+                                    bool is_far, bool is_unordered) {                \
+    float_##CMP(Rs2, Rs1, l, is_far, is_unordered);                                  \
+  }                                                                                  \
+  void MacroAssembler::double_##NAME(FloatRegister Rs1, FloatRegister Rs2, Label &l, \
+                                     bool is_far, bool is_unordered) {               \
+    double_##CMP(Rs2, Rs1, l, is_far, is_unordered);                                 \
+  }
+
+  INSN(bgt, blt);
+  INSN(bge, ble);
+
+#undef INSN
 
 void MacroAssembler::j(Label& L) {
   if (L.is_bound()) {
@@ -967,6 +1121,15 @@ void MacroAssembler::shift_left_add(Register Rd, Register Rs1, Register Rs2, int
   } else {
     add(Rd, Rs1, Rs2);
   }
+}
+
+Address MacroAssembler::form_address(Register Rd, Register base, long byte_offset) {
+  if (is_simm12(byte_offset)) {
+    return Address(base, byte_offset);
+  }
+  mv(Rd, byte_offset);
+  add(Rd, base, Rd);
+  return Address(Rd, 0);
 }
 
 void MacroAssembler::membar(uint32_t order_constraint) {
@@ -1529,8 +1692,8 @@ bool MacroAssembler::uses_implicit_null_check(void* address) {
 // -------------------------------------------------------------
 // Klass Encoding/Decoding and Loading/Storing
 // -------------------------------------------------------------
-void MacroAssembler::encode_klass_not_null(Register r, Register tmp) {
-  encode_klass_not_null(r, r, tmp);
+void MacroAssembler::encode_klass_not_null(Register r) {
+  encode_klass_not_null(r, r);
 }
 
 void MacroAssembler::encode_klass_not_null(Register dst, Register src, Register tmp) {
@@ -1554,8 +1717,8 @@ void MacroAssembler::encode_klass_not_null(Register dst, Register src, Register 
   }
 }
 
-void MacroAssembler::decode_klass_not_null(Register r, Register tmp) {
-  decode_klass_not_null(r, r, tmp);
+void MacroAssembler::decode_klass_not_null(Register r) {
+  decode_klass_not_null(r, r);
 }
 
 void MacroAssembler::decode_klass_not_null(Register dst, Register src, Register tmp) {
@@ -1606,6 +1769,23 @@ void MacroAssembler::store_klass_gap(Register dst, Register src) {
 void MacroAssembler::load_prototype_header(Register dst, Register src) {
   load_klass(dst, src);
   ld(dst, Address(dst, Klass::prototype_header_offset()));
+}
+
+void MacroAssembler::cmp_klass(Register oop, Register trial_klass, Register tmp, Label &L) {
+  if (UseCompressedClassPointers) {
+    lwu(tmp, Address(oop, oopDesc::klass_offset_in_bytes()));
+    if (Universe::narrow_klass_base() == NULL) {
+      if (Universe::narrow_klass_shift() != 0) {
+        slli(tmp, tmp, Universe::narrow_klass_shift());
+      }
+      beq(trial_klass, tmp, L);
+      return;
+    }
+    decode_klass_not_null(tmp);
+  } else {
+    ld(tmp, Address(oop, oopDesc::klass_offset_in_bytes()));
+  }
+  beq(trial_klass, tmp, L);
 }
 
 // -------------------------------------------------------------
@@ -1746,7 +1926,7 @@ void MacroAssembler::check_klass_subtype(Register sub_klass,
                                          Label& L_success) {
   Label L_failure;
   check_klass_subtype_fast_path(sub_klass, super_klass, temp_reg, &L_success, &L_failure, NULL);
-  check_klass_subtype_slow_path_linear(sub_klass, super_klass, temp_reg, noreg, &L_success, NULL);
+  check_klass_subtype_slow_path(sub_klass, super_klass, temp_reg, noreg, &L_success, NULL);
   bind(L_failure);
 }
 
@@ -1755,34 +1935,138 @@ void MacroAssembler::check_klass_subtype_fast_path(Register sub_klass,
                                                    Register temp_reg,
                                                    Label* L_success,
                                                    Label* L_failure,
-                                                   Label* L_slow_path) {
+                                                   Label* L_slow_path,
+                                                   Register super_check_offset) {
   assert_different_registers(sub_klass, super_klass, temp_reg);
+  bool must_load_sco = (super_check_offset == noreg);
+  if (must_load_sco) {
+    assert(temp_reg != noreg, "supply either a temp or a register offset");
+  } else {
+    assert_different_registers(sub_klass, super_klass, super_check_offset);
+  }
+
   Label L_fallthrough;
-  if (L_success == NULL) L_success = &L_fallthrough;
-  if (L_failure == NULL) L_failure = &L_fallthrough;
+  int label_nulls = 0;
+  if (L_success == NULL)   { L_success   = &L_fallthrough; label_nulls++; }
+  if (L_failure == NULL)   { L_failure   = &L_fallthrough; label_nulls++; }
+  if (L_slow_path == NULL) { L_slow_path = &L_fallthrough; label_nulls++; }
+  assert(label_nulls <= 1, "at most one NULL in batch");
 
-  int sco_offset = in_bytes(Klass::super_check_offset_offset());
   int sc_offset  = in_bytes(Klass::secondary_super_cache_offset());
+  int sco_offset = in_bytes(Klass::super_check_offset_offset());
+  Address super_check_offset_addr(super_klass, sco_offset);
 
-  // 1. If same klass, success
+  // 1. If the pointers are equal, we are done (e.g., String[] elements).
   beq(sub_klass, super_klass, *L_success);
 
-  // 2. Load displayed supertype
-  lwu(temp_reg, Address(super_klass, sco_offset));
-  add(t0, sub_klass, temp_reg);
-  ld(t0, Address(t0, 0));
-  beq(super_klass, t0, *L_success);
+  // 2. Check the supertype display:
+  if (must_load_sco) {
+    lwu(temp_reg, super_check_offset_addr);
+    super_check_offset = temp_reg;
+  }
+  add(t0, sub_klass, super_check_offset);
+  ld(t0, Address(t0, 0)); // load displayed supertype
 
-  // 3. If primary super, fail immediately
+  beq(super_klass, t0, *L_success);
   mv(t1, sc_offset);
-  if (L_slow_path == NULL) {
-    bne(temp_reg, t1, *L_failure);
+  if (L_failure == &L_fallthrough) {
+    beq(super_check_offset, t1, *L_slow_path);
   } else {
-    beq(temp_reg, t1, *L_slow_path);
-    if (L_failure != &L_fallthrough) {
-      j(*L_failure);
+    bne(super_check_offset, t1, *L_failure, /* is_far */ true);
+    if (L_slow_path != &L_fallthrough) {
+      j(*L_slow_path);
     }
   }
+
+  bind(L_fallthrough);
+}
+
+void MacroAssembler::repne_scan(Register addr, Register value, Register count,
+                                Register tmp) {
+  Label Lloop, Lexit;
+  beqz(count, Lexit);
+  bind(Lloop);
+  ld(tmp, Address(addr, 0));
+  beq(value, tmp, Lexit);
+  addi(addr, addr, wordSize);
+  subi(count, count, 1);
+  bnez(count, Lloop);
+  bind(Lexit);
+}
+
+void MacroAssembler::check_klass_subtype_slow_path(Register sub_klass,
+                                                   Register super_klass,
+                                                   Register tmp1_reg,
+                                                   Register tmp2_reg,
+                                                   Label* L_success,
+                                                   Label* L_failure) {
+  assert_different_registers(sub_klass, super_klass, tmp1_reg);
+  if (tmp2_reg != noreg) {
+    assert_different_registers(sub_klass, super_klass, tmp1_reg, tmp2_reg, t0);
+  }
+#define IS_A_TEMP(reg) ((reg) == tmp1_reg || (reg) == tmp2_reg)
+
+  Label L_fallthrough;
+  int label_nulls = 0;
+  if (L_success == NULL) { L_success = &L_fallthrough; label_nulls++; }
+  if (L_failure == NULL) { L_failure = &L_fallthrough; label_nulls++; }
+  assert(label_nulls <= 1, "at most one NULL in the batch");
+
+  int ss_offset = in_bytes(Klass::secondary_supers_offset());
+  int sc_offset = in_bytes(Klass::secondary_super_cache_offset());
+  Address secondary_supers_addr(sub_klass, ss_offset);
+  Address super_cache_addr(sub_klass, sc_offset);
+
+  assert(sub_klass != x10, "killed reg");
+  assert(sub_klass != x12, "killed reg");
+
+  RegSet pushed_registers;
+  if (!IS_A_TEMP(x12)) {
+    pushed_registers += x12;
+  }
+  if (!IS_A_TEMP(x15)) {
+    pushed_registers += x15;
+  }
+  if (super_klass != x10 && !IS_A_TEMP(x10)) {
+    pushed_registers += x10;
+  }
+
+  push_reg(pushed_registers, sp);
+
+  // Get super_klass value into x10 (even if it was in x15 or x12)
+  mv(x10, super_klass);
+
+#ifndef PRODUCT
+  mv(t1, (address)&SharedRuntime::_partial_subtype_ctr);
+  ld(t0, Address(t1, 0));
+  addi(t0, t0, 1);
+  sd(t0, Address(t1, 0));
+#endif // PRODUCT
+
+  // Consult the secondary-super array.
+  ld(x15, secondary_supers_addr);
+  lwu(x12, Address(x15, Array<Klass*>::length_offset_in_bytes()));
+  addi(x15, x15, Array<Klass*>::base_offset_in_bytes());
+
+  // Set t0 to an obvious invalid value, falling through by default
+  li(t0, -1);
+  repne_scan(x15, x10, x12, t0);
+
+  // pop will restore x10, so keep its value in t1
+  mv(t1, x10);
+
+  pop_reg(pushed_registers, sp);
+
+  bne(t1, t0, *L_failure);
+
+  // Success. Cache the super we found and proceed.
+  sd(super_klass, super_cache_addr);
+
+  if (L_success != &L_fallthrough) {
+    j(*L_success);
+  }
+
+#undef IS_A_TEMP
 
   bind(L_fallthrough);
 }
@@ -1793,36 +2077,33 @@ void MacroAssembler::check_klass_subtype_slow_path_linear(Register sub_klass,
                                                           Register tmp2_reg,
                                                           Label* L_success,
                                                           Label* L_failure) {
-  Label L_fallthrough;
-  if (L_success == NULL) L_success = &L_fallthrough;
-  if (L_failure == NULL) L_failure = &L_fallthrough;
+  check_klass_subtype_slow_path(sub_klass, super_klass, tmp1_reg, tmp2_reg, L_success, L_failure);
+}
 
-  int ss_offset = in_bytes(Klass::secondary_supers_offset());
-  int sc_offset = in_bytes(Klass::secondary_super_cache_offset());
-
-  // Scan secondary supers array
-  ld(t1, Address(sub_klass, ss_offset));
-  lwu(t2, Address(t1, Array<Klass*>::length_offset_in_bytes()));
-  addi(t1, t1, Array<Klass*>::base_offset_in_bytes());
-
-  Label loop, exit;
-  beqz(t2, exit);
-  bind(loop);
-  ld(t0, Address(t1, 0));
-  beq(super_klass, t0, exit);
-  addi(t1, t1, wordSize);
-  subi(t2, t2, 1);
-  bnez(t2, loop);
-  bind(exit);
-
-  bne(super_klass, t0, *L_failure);
-
-  // Success: update secondary_super_cache
-  sd(super_klass, Address(sub_klass, sc_offset));
-  if (L_success != &L_fallthrough) {
-    j(*L_success);
+Address MacroAssembler::add_memory_helper(const Address dst) {
+  switch (dst.getMode()) {
+    case Address::base_plus_offset:
+      return form_address(t1, dst.base(), dst.offset());
+    default:
+      la(t1, dst);
+      return Address(t1, 0);
   }
-  bind(L_fallthrough);
+}
+
+void MacroAssembler::add_memory_int64(const Address dst, int64_t imm) {
+  Address adr = add_memory_helper(dst);
+  assert_different_registers(adr.base(), t0);
+  ld(t0, adr);
+  addi(t0, t0, imm);
+  sd(t0, adr);
+}
+
+void MacroAssembler::add_memory_int32(const Address dst, int32_t imm) {
+  Address adr = add_memory_helper(dst);
+  assert_different_registers(adr.base(), t0);
+  lwu(t0, adr);
+  addiw(t0, t0, imm);
+  sw(t0, adr);
 }
 
 // -------------------------------------------------------------
@@ -1899,26 +2180,27 @@ void MacroAssembler::lookup_interface_method(Register recv_klass,
 }
 
 // -------------------------------------------------------------
-// Allocation Helpers
+// Allocation & Zeroing Helpers
 // -------------------------------------------------------------
 void MacroAssembler::tlab_allocate(Register obj,
                                    Register var_size_in_bytes,
                                    int con_size_in_bytes,
                                    Register t1,
                                    Register t2,
-                                   Label& slow_case) {
+                                   Label& slow_case,
+                                   bool is_far) {
   assert_different_registers(obj, t2);
   assert_different_registers(obj, var_size_in_bytes);
   Register end = t2;
 
   ld(obj, Address(xthread, JavaThread::tlab_top_offset()));
   if (var_size_in_bytes == noreg) {
-    addi(end, obj, con_size_in_bytes);
+    la(end, Address(obj, con_size_in_bytes));
   } else {
     add(end, obj, var_size_in_bytes);
   }
   ld(t0, Address(xthread, JavaThread::tlab_end_offset()));
-  bgtu(end, t0, slow_case);
+  bgtu(end, t0, slow_case, is_far);
 
   // update the tlab top pointer
   sd(end, Address(xthread, JavaThread::tlab_top_offset()));
@@ -1926,6 +2208,182 @@ void MacroAssembler::tlab_allocate(Register obj,
   if (var_size_in_bytes == end) {
     sub(var_size_in_bytes, var_size_in_bytes, obj);
   }
+}
+
+// Defines obj, preserves var_size_in_bytes
+void MacroAssembler::eden_allocate(Register obj,
+                                   Register var_size_in_bytes,
+                                   int con_size_in_bytes,
+                                   Register tmp1,
+                                   Label& slow_case,
+                                   bool is_far) {
+  assert_different_registers(obj, var_size_in_bytes, tmp1);
+  if (CMSIncrementalMode || !Universe::heap()->supports_inline_contig_alloc()) {
+    j(slow_case);
+  } else {
+    Register end = tmp1;
+    Label retry;
+    bind(retry);
+
+    // Get the current end of the heap
+    ExternalAddress address_end((address) Universe::heap()->end_addr());
+    {
+      int32_t offset = 0;
+      la_patchable(t1, address_end, offset);
+      Assembler::ld(t1, t1, offset);
+    }
+
+    // Get the current top of the heap
+    ExternalAddress address_top((address) Universe::heap()->top_addr());
+    {
+      int32_t offset = 0;
+      la_patchable(t0, address_top, offset);
+      addi(t0, t0, offset);
+      lr_d(obj, t0, true /* aq */, true /* rl */);
+    }
+
+    // Adjust it by the size of our new object
+    if (var_size_in_bytes == noreg) {
+      la(end, Address(obj, con_size_in_bytes));
+    } else {
+      add(end, obj, var_size_in_bytes);
+    }
+
+    // if end < obj then we wrapped around high memory
+    bltu(end, obj, slow_case, is_far);
+
+    bgtu(end, t1, slow_case, is_far);
+
+    // If heap_top hasn't been changed by some other thread, update it.
+    sc_d(t1, end, t0, false /* aq */, true /* rl */);
+    bnez(t1, retry);
+
+    incr_allocated_bytes(xthread, var_size_in_bytes, con_size_in_bytes, tmp1);
+  }
+}
+
+void MacroAssembler::incr_allocated_bytes(Register thread,
+                                          Register var_size_in_bytes,
+                                          int con_size_in_bytes,
+                                          Register t1) {
+  if (!thread->is_valid()) {
+    thread = xthread;
+  }
+  assert(t1->is_valid(), "need temp reg");
+
+  ld(t1, Address(thread, in_bytes(JavaThread::allocated_bytes_offset())));
+  if (var_size_in_bytes->is_valid()) {
+    add(t1, t1, var_size_in_bytes);
+  } else {
+    la(t1, Address(t1, con_size_in_bytes));
+  }
+  sd(t1, Address(thread, in_bytes(JavaThread::allocated_bytes_offset())));
+}
+
+// Zero words; len is in bytes
+// Destroys all registers except addr
+// len must be a nonzero multiple of wordSize
+void MacroAssembler::zero_memory(Register addr, Register len, Register tmp) {
+  assert_different_registers(addr, len, tmp, t0, t1);
+
+#ifdef ASSERT
+  {
+    Label L;
+    andi(t0, len, BytesPerWord - 1);
+    beqz(t0, L);
+    stop("len is not a multiple of BytesPerWord");
+    bind(L);
+  }
+#endif // ASSERT
+
+  Label loop;
+  Label entry;
+
+  const int unroll = 8;   // Number of sd(zr) instructions we'll unroll
+
+  srli(len, len, LogBytesPerWord);
+  andi(t0, len, unroll - 1);  // t0 = cnt % unroll
+  sub(len, len, t0);          // cnt -= unroll
+  // tmp always points to the end of the region we're about to zero
+  shadd(tmp, t0, addr, t1, LogBytesPerWord);
+  la(t1, entry);
+  slli(t0, t0, 2);
+  sub(t1, t1, t0);
+  jr(t1);
+  bind(loop);
+  subi(len, len, unroll);
+  for (int i = -unroll; i < 0; i++) {
+    Assembler::sd(zr, tmp, i * wordSize);
+  }
+  bind(entry);
+  addi(tmp, tmp, unroll * wordSize);
+  bnez(len, loop);
+}
+
+#define SmallArraySize (18 * BytesPerLong)
+
+// base:  Address of a buffer to be zeroed, 8 bytes aligned.
+// cnt:   Immediate count in HeapWords.
+void MacroAssembler::zero_words(Register base, uint64_t cnt) {
+  assert_different_registers(base, t0, t1);
+
+  if (cnt <= SmallArraySize / BytesPerLong) {
+    for (int i = 0; i < (int)cnt; i++) {
+      sd(zr, Address(base, i * wordSize));
+    }
+  } else {
+    const int unroll = 8; // Number of sd(zr, adr) instructions we'll unroll
+    int remainder = cnt % unroll;
+    for (int i = 0; i < remainder; i++) {
+      sd(zr, Address(base, i * wordSize));
+    }
+
+    Label loop;
+    Register cnt_reg = t0;
+    Register loop_base = t1;
+    cnt = cnt - remainder;
+    li(cnt_reg, cnt);
+    la(loop_base, Address(base, remainder * wordSize));
+    bind(loop);
+    subi(cnt_reg, cnt_reg, unroll);
+    for (int i = 0; i < unroll; i++) {
+      Assembler::sd(zr, loop_base, i * wordSize);
+    }
+    addi(loop_base, loop_base, unroll * wordSize);
+    bnez(cnt_reg, loop);
+  }
+}
+
+// base:   Address of a buffer to be filled, 8 bytes aligned.
+// cnt:    Count in 8-byte unit.
+// value:  Value to be filled with.
+// base will point to the end of the buffer after filling.
+void MacroAssembler::fill_words(Register base, Register cnt, Register value) {
+  assert_different_registers(base, cnt, value, t0, t1);
+
+  Label fini, entry, loop;
+  const int unroll = 8; // Number of sd instructions we'll unroll
+
+  beqz(cnt, fini);
+
+  andi(t0, cnt, unroll - 1);
+  sub(cnt, cnt, t0);
+  shadd(base, t0, base, t1, 3);
+  la(t1, entry);
+  slli(t0, t0, 2);
+  sub(t1, t1, t0);
+  jr(t1);
+
+  bind(loop);
+  addi(base, base, unroll * 8);
+  for (int i = -unroll; i < 0; i++) {
+    Assembler::sd(value, base, i * 8);
+  }
+  bind(entry);
+  subi(cnt, cnt, unroll);
+  bgez(cnt, loop);
+
+  bind(fini);
 }
 
 // -------------------------------------------------------------

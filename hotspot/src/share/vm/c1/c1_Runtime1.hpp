@@ -167,6 +167,9 @@ class Runtime1: public AllStatic {
 #ifdef TARGET_ARCH_aarch64
   static void patch_code_aarch64(JavaThread* thread, StubID stub_id);
 #endif
+#ifdef TARGET_ARCH_riscv
+  static void patch_code_riscv(JavaThread* thread, StubID stub_id);
+#endif
 
  public:
   // initialization

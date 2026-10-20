@@ -23,57 +23,7 @@
 // ----------------------------------------------------------------------------
 // C1 Stubs & Variables
 // ----------------------------------------------------------------------------
-int PatchingStub::_patch_info_offset = 0;
-
 void LinearScan::allocate_fpu_stack() { ShouldNotReachHere(); }
-
-void ArrayCopyStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-void CounterOverflowStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-void DeoptimizeStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-void DivByZeroStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-void G1PostBarrierStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-void G1PreBarrierStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-void ImplicitNullCheckStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-void MonitorExitStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-void SimpleExceptionStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-
-MonitorEnterStub::MonitorEnterStub(LIR_Opr obj_reg, LIR_Opr lock_reg, CodeEmitInfo* info)
-  : MonitorAccessStub(obj_reg, lock_reg), _info(info) {}
-void MonitorEnterStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-
-RangeCheckStub::RangeCheckStub(CodeEmitInfo* info, LIR_Opr index, bool throw_index_out_of_bounds_exception)
-  : _info(info), _index(index), _throw_index_out_of_bounds_exception(throw_index_out_of_bounds_exception) {}
-void RangeCheckStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-
-PredicateFailedStub::PredicateFailedStub(CodeEmitInfo* info)
-  : _info(info) {}
-void PredicateFailedStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-
-NewInstanceStub::NewInstanceStub(LIR_Opr klass_reg, LIR_Opr result, ciInstanceKlass* klass, CodeEmitInfo* info, Runtime1::StubID stub_id)
-  : _klass_reg(klass_reg), _result(result), _klass(klass), _info(info), _stub_id(stub_id) {}
-void NewInstanceStub::emit_code(LIR_Assembler* ce) { ShouldNotReachHere(); }
-
-void C1_MacroAssembler::verified_entry() { ShouldNotReachHere(); }
-void C1_MacroAssembler::build_frame(int frame_size_in_bytes, int bang_size_in_bytes) { ShouldNotReachHere(); }
-#ifndef PRODUCT
-void C1_MacroAssembler::verify_stack_oop(int stack_offset) { }
-#endif
-
-void Runtime1::initialize_pd() { }
-OopMapSet* Runtime1::generate_code_for(Runtime1::StubID id, StubAssembler* sasm) { ShouldNotReachHere(); return NULL; }
-const char* Runtime1::pd_name_for_address(address m) { return "pd_stub"; }
-
-LIR_Opr FrameMap::_caller_save_cpu_regs[FrameMap::max_nof_caller_save_cpu_regs];
-LIR_Opr FrameMap::_caller_save_fpu_regs[FrameMap::nof_caller_save_fpu_regs];
-LIR_Opr FrameMap::fp_opr;
-LIR_Opr FrameMap::sp_opr;
-
-void FrameMap::initialize() { }
-LIR_Opr FrameMap::map_to_opr(BasicType type, VMRegPair* reg, bool is_two_slot) { ShouldNotReachHere(); return LIR_OprFact::illegalOpr; }
-VMReg FrameMap::fpu_regname(int n) { ShouldNotReachHere(); return VMRegImpl::Bad(); }
-LIR_Opr FrameMap::stack_pointer() { return sp_opr; }
-bool FrameMap::validate_frame() { return true; }
-LIR_Opr FrameMap::method_handle_invoke_SP_save_opr() { return fp_opr; }
 
 void LIRItem::load_byte_item() { ShouldNotReachHere(); }
 void LIRItem::load_nonconstant() { ShouldNotReachHere(); }

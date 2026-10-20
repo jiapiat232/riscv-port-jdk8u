@@ -314,11 +314,12 @@
 
 ### 【Sprint Card 3.1】C1 寄存器映射、C1 宏汇编、CodeStubs 与 Runtime1 桩
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`
-* **对应源码**：`c1_FrameMap_riscv.cpp`, `c1_MacroAssembler_riscv.cpp`, `c1_CodeStubs_riscv.cpp`, `c1_Runtime1_riscv.cpp`
+* **状态**：`[x] 100% 已完成`
+* **对应源码**：[`c1_FrameMap_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_FrameMap_riscv.cpp), [`c1_MacroAssembler_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_MacroAssembler_riscv.cpp), [`c1_CodeStubs_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_CodeStubs_riscv.cpp), [`c1_Runtime1_riscv.cpp`](file:///Users/wujiahua/code/riscv-port-jdk8u/hotspot/src/cpu/riscv/vm/c1_Runtime1_riscv.cpp)
 * **核心验收 Checklist**：
-  - [ ] 定义 C1 虚拟寄存器映射与物理寄存器池掩码（Caller/Callee-saved 分配规则）；
-  - [ ] 实现 `C1_MacroAssembler`（`inline_cache_check`、`build_frame`、`allocate_object`、`allocate_array`、`lock_object`、`unlock_object`）；
-  - [ ] 实现 `c1_CodeStubs_riscv.cpp` 与 `c1_Runtime1_riscv.cpp` 全部运行时存根。
+  - [x] 定义 C1 虚拟寄存器映射与物理寄存器池掩码（22 个可分配通用寄存器 `rnr 0..21` 与 10 个保留寄存器隔离）；
+  - [x] 实现 `C1_MacroAssembler`（`inline_cache_check`、`build_frame`、`allocate_object`、`allocate_array`、`lock_object`、`unlock_object`）；
+  - [x] 实现 `c1_CodeStubs_riscv.cpp` 与 `c1_Runtime1_riscv.cpp` 全部运行时存根（含 G1 Pre/Post Barrier Stub 与 `patch_code_riscv` 逆优化修补）。
 
 ### 【Sprint Card 3.2】C1 LIR 生成器与 LIR 汇编器
 * **责任模块**：`hotspot/src/cpu/riscv/vm/`

@@ -801,8 +801,8 @@ static Klass* resolve_field_return_klass(methodHandle caller, int bci, TRAPS) {
 JRT_ENTRY(void, Runtime1::patch_code(JavaThread* thread, Runtime1::StubID stub_id ))
   NOT_PRODUCT(_patch_code_slowcase_cnt++;)
 
-#ifdef AARCH64
-  // AArch64 does not patch C1-generated code.
+#if defined(AARCH64) || defined(RISCV)
+  // AArch64 and RISC-V do not patch C1-generated code in place; they deoptimize instead.
   ShouldNotReachHere();
 #endif
 
@@ -1195,7 +1195,7 @@ JRT_END
 // completes we can check for deoptimization. This simplifies the
 // assembly code in the cpu directories.
 //
-#ifndef TARGET_ARCH_aarch64
+#if !defined(TARGET_ARCH_aarch64) && !defined(TARGET_ARCH_riscv)
 int Runtime1::move_klass_patching(JavaThread* thread) {
 //
 // NOTE: we are still in Java
